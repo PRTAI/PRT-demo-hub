@@ -20,6 +20,12 @@ services:
       FEISHU_APP_ID: ${FEISHU_APP_ID:?Set the Feishu application ID}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?Set the Feishu application secret}
       FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Set the allowed enterprise tenant key}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      RAG_LLM_MODEL: ${RAG_LLM_MODEL:-qwen-plus}
+      DESCRIPTION_AGENT_API_KEY: ${DESCRIPTION_AGENT_API_KEY:-}
+      DESCRIPTION_AGENT_BASE_URL: ${DESCRIPTION_AGENT_BASE_URL:-}
+      DESCRIPTION_AGENT_MODEL: ${DESCRIPTION_AGENT_MODEL:-}
+      DESCRIPTION_AGENT_COMMAND: ${DESCRIPTION_AGENT_COMMAND:-claude}
       BOOTSTRAP_ADMIN_OPEN_IDS: ${BOOTSTRAP_ADMIN_OPEN_IDS:-}
     volumes:
       - production-data:/app/data
