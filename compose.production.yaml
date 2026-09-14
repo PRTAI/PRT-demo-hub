@@ -8,15 +8,15 @@ services:
     init: true
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${PRT_PRODUCTION_PORT:-8081}:3100"
+      - "0.0.0.0:8001:3100"
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       DEMO_MODE: "false"
       CONTAINER_PREVIEW: "false"
       HOST: 0.0.0.0
       PORT: "3100"
       DATA_DIR: /app/data
-      APP_ORIGIN: ${APP_ORIGIN:?Set the actual HTTPS application origin}
+      APP_ORIGIN: ${APP_ORIGIN:?Set the application origin}
       FEISHU_APP_ID: ${FEISHU_APP_ID:?Set the Feishu application ID}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?Set the Feishu application secret}
       FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Set the allowed enterprise tenant key}

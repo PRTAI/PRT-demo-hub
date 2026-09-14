@@ -345,6 +345,19 @@ test('RAG search only returns visible descriptions and can use an LLM answer', a
   await employee.send('post', '/search/rag', { question: '一' }).expect(400);
 });
 
+test('RAG search excludes offline Demos', async t => {
+  const ctx = await fixture(t), manager = await ctx.login('preview-manager');
+  const marker = 'OFFLINESEARCHZXQ999';
+  const demo = (await manager.send('post', '/assets', { description: { ...description, title: '待下架检索样例', content: marker } }).expect(201)).body;
+  await manager.upload(demo.versionId, 0).expect(201);
+  assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
+  let result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
+  assert.ok(result.body.sources.some(asset => asset.id === demo.id));
+  assert.equal((await action(manager, demo.versionId, 2, 'unpublish', '停止使用')).status, 200);
+  result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
+  assert.ok(!result.body.sources.some(asset => asset.id === demo.id));
+});
+
 test('RAG stream emits visible agent retrieval stages before its result', async t => {
   const ctx = await fixture(t), employee = await ctx.login('preview-employee');
   const response = await employee.send('post', '/search/rag/stream', { question: '门店销售趋势分析' }).expect(200);
