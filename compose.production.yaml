@@ -1,0 +1,40 @@
+# Standalone production configuration; do not merge with the preview file.
+name: prt-datahub-production
+services:
+  app:
+    build: .
+    image: prt-datahub:production
+    container_name: prt-datahub-production
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PRT_PRODUCTION_PORT:-8081}:3100"
+    environment:
+      NODE_ENV: production
+      DEMO_MODE: "false"
+      CONTAINER_PREVIEW: "false"
+      HOST: 0.0.0.0
+      PORT: "3100"
+      DATA_DIR: /app/data
+      APP_ORIGIN: ${APP_ORIGIN:?Set the actual HTTPS application origin}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:?Set the Feishu application ID}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?Set the Feishu application secret}
+      FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Set the allowed enterprise tenant key}
+      BOOTSTRAP_ADMIN_OPEN_IDS: ${BOOTSTRAP_ADMIN_OPEN_IDS:-}
+    volumes:
+      - production-data:/app/data
+      - production-backups:/app/backups
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 35s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  production-data:
+  production-backups:

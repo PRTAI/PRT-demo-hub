@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/
+.preview-data/
+backups/
+.preview-backups/
+*.log
+test-results/
+host-data/
+.host-runtime/

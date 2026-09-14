@@ -1,0 +1,40 @@
+# Single-host Feishu integration; LAN entry is configured in the environment file.
+name: prt-datahub-login
+services:
+  app:
+    build: .
+    image: prt-datahub:feishu-local
+    container_name: prt-datahub-login
+    init: true
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8080:3100"
+    environment:
+      NODE_ENV: development
+      DEMO_MODE: "false"
+      CONTAINER_PREVIEW: "false"
+      HOST: 0.0.0.0
+      PORT: "3100"
+      APP_ORIGIN: ${PRT_APP_ORIGIN:?Set the employee-facing application origin}
+      DATA_DIR: /app/data
+      FEISHU_APP_ID: ${FEISHU_APP_ID:?Set the Feishu app ID}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?Set the Feishu app secret}
+      FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Set the enterprise tenant key}
+      BOOTSTRAP_ADMIN_OPEN_IDS: ${BOOTSTRAP_ADMIN_OPEN_IDS:-}
+    volumes:
+      - login-data:/app/data
+      - login-backups:/app/backups
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 35s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  login-data:
+  login-backups:

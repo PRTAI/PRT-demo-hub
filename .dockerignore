@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.env
+.env.*
+data
+.preview-data
+.preview-backups
+backups
+test-results
+host-data
+.host-runtime
+*.log
