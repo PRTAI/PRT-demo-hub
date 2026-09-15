@@ -11,10 +11,14 @@ function run(command, args, options) {
 async function callCompatibleApi(config, prompt) {
   const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),180000);
   try {
-    const response=await fetch(`${config.descriptionAgentUrl.replace(/\/$/,'')}/v1/messages`,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json','x-api-key':config.descriptionAgentKey,'anthropic-version':'2023-06-01'},body:JSON.stringify({model:config.descriptionAgentModel,max_tokens:8192,messages:[{role:'user',content:prompt}]})});
+    const request=config.descriptionAgentFetch||fetch;
+    const response=await request(`${config.descriptionAgentUrl.replace(/\/$/,'')}/v1/messages`,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json','x-api-key':config.descriptionAgentKey,'authorization':`Bearer ${config.descriptionAgentKey}`,'anthropic-version':'2023-06-01'},body:JSON.stringify({model:config.descriptionAgentModel,max_tokens:8192,messages:[{role:'user',content:prompt}]})});
     const payload=await response.json().catch(()=>null);
     if(!response.ok) throw new Error(`兼容接口请求失败（HTTP ${response.status}）${payload?.error?.message?`：${payload.error.message}`:''}`);
-    const text=payload?.content?.filter(item=>item.type==='text').map(item=>item.text).join('\n').trim();
+    const anthropicText=Array.isArray(payload?.content)?payload.content.filter(item=>item.type==='text').map(item=>item.text).join('\n'):'';
+    const openAiContent=payload?.choices?.[0]?.message?.content;
+    const openAiText=Array.isArray(openAiContent)?openAiContent.filter(item=>item.type==='text'||item.type==='output_text').map(item=>item.text||item.content||'').join('\n'):openAiContent;
+    const text=String(anthropicText||openAiText||payload?.output_text||payload?.text||'').trim();
     if(!text) throw new Error('兼容接口没有返回文本内容');
     const cleaned=text.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
     try { return JSON.parse(cleaned); } catch { return { markdown:cleaned }; }

@@ -9,10 +9,16 @@ COPY src ./src
 RUN npm run build
 
 FROM ${NODE_IMAGE}
+ARG CLAUDE_CODE_VERSION=2.1.272
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3100 DATA_DIR=/app/data BACKUP_DIR=/app/backups DEMO_MODE=false
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force && mkdir /app/data /app/backups && chown node:node /app/data /app/backups
+RUN npm ci --omit=dev --no-audit --no-fund \
+    && npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && claude --version \
+    && npm cache clean --force \
+    && mkdir /app/data /app/backups \
+    && chown node:node /app/data /app/backups
 COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY scripts ./scripts

@@ -389,6 +389,26 @@ test('description agent runs in background, preserves the draft and queues reque
   await (await ctx.login('preview-other')).send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(404);
 });
 
+test('description agent falls back to OpenAI-compatible text when Claude CLI is unavailable', async t => {
+  const markdown = '# 数据概述\n\n本数据用于验证兼容接口。\n\n# 数据格式\n\n```text\ndata.csv  # 数据文件\n```';
+  let authorization = '';
+  const ctx = await fixture(t, {
+    descriptionAgentKey: 'compatible-test-key', descriptionAgentUrl: 'https://agent.test', descriptionAgentModel: 'compatible-test-model',
+    descriptionAgentCommand: 'missing-claude-command-for-test',
+    descriptionAgentFetch: async (_url, options) => {
+      authorization = options.headers.authorization;
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ markdown }) } }] }) };
+    }
+  });
+  const owner = await ctx.login('preview-employee'), demo = await create(owner);
+  await owner.upload(demo.versionId, 0, 'data.csv', Buffer.from('id,value\n1,2')).expect(201);
+  const queued = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(202);
+  let job; for (let i=0;i<50;i++) { job=(await owner.get(`/description/jobs/${queued.body.id}`).expect(200)).body; if (['complete','failed'].includes(job.status)) break; await new Promise(resolve=>setTimeout(resolve,10)); }
+  assert.equal(job.status, 'complete');
+  assert.equal(job.result.markdown, markdown);
+  assert.equal(authorization, 'Bearer compatible-test-key');
+});
+
 test('admin can atomically transfer a filtered selection of assets', async t => {
   const ctx = await fixture(t), admin = await ctx.login('preview-admin'), owner = await ctx.login('preview-employee');
   const first = await create(owner), second = await create(owner);
