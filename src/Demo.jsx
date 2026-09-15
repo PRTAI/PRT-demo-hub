@@ -130,14 +130,23 @@ export function Detail({ id, user, onClose, onEdit, onChanged, notify }) {
 function MarkdownText({ value }) {
   if (!value?.trim()) return <p>暂未填写</p>;
   const blocks = [], lines = value.split(/\r?\n/); let code = [], inCode = false;
-  lines.forEach((line, index) => {
-    if (line.trim().startsWith('```')) { if (inCode) { blocks.push(<pre className="markdown-code" key={`code-${index}`}>{code.join('\n')}</pre>); code = []; } inCode = !inCode; return; }
-    if (inCode) { code.push(line); return; }
-    if (/^#\s+/.test(line)) blocks.push(<h2 key={index}>{line.replace(/^#\s+/,'')}</h2>);
+  const cells = line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim());
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.trim().startsWith('```')) { if (inCode) { blocks.push(<pre className="markdown-code" key={`code-${index}`}>{code.join('\n')}</pre>); code = []; } inCode = !inCode; continue; }
+    if (inCode) { code.push(line); continue; }
+    const header = cells(line), separator = index + 1 < lines.length ? cells(lines[index + 1]) : [];
+    const isTable = line.includes('|') && header.length > 1 && separator.length === header.length && separator.every(cell => /^:?-{3,}:?$/.test(cell));
+    if (isTable) {
+      const rows = []; index += 2;
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) { const row = cells(lines[index]); rows.push([...row, ...Array(Math.max(0, header.length - row.length)).fill('')].slice(0, header.length)); index++; }
+      index--;
+      blocks.push(<div className="markdown-table-scroll" key={`table-${index}`}><table className="markdown-table"><thead><tr>{header.map((cell, column) => <th key={column}>{cell}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, column) => <td key={column}>{cell}</td>)}</tr>)}</tbody></table></div>);
+    } else if (/^#\s+/.test(line)) blocks.push(<h2 key={index}>{line.replace(/^#\s+/,'')}</h2>);
     else if (/^##\s+/.test(line)) blocks.push(<h3 key={index}>{line.replace(/^##\s+/,'')}</h3>);
     else if (/^[-*]\s+/.test(line)) blocks.push(<div className="markdown-list-item" key={index}>• {line.replace(/^[-*]\s+/,'')}</div>);
     else if (line.trim()) blocks.push(<p key={index}>{line}</p>);
-  });
+  }
   if (code.length) blocks.push(<pre className="markdown-code" key="code-last">{code.join('\n')}</pre>);
   return <div className="markdown-content">{blocks}</div>;
 }
