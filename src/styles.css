@@ -100,3 +100,11 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 
 /* GitHub-style Markdown tables in Demo descriptions. */
 .markdown-content{min-width:0}.markdown-table-scroll{width:100%;overflow-x:auto;border:1px solid #dfe7da;border-radius:8px}.markdown-table{border-collapse:collapse;width:100%;text-align:left}.markdown-table th,.markdown-table td{min-width:110px;padding:10px 12px;border-right:1px solid #dfe7da;border-bottom:1px solid #dfe7da;white-space:normal;vertical-align:top}.markdown-table th:last-child,.markdown-table td:last-child{border-right:0}.markdown-table tbody tr:last-child td{border-bottom:0}.markdown-table th{background:#f2f6ee;color:#526849;font-weight:600}.markdown-table tbody tr:hover{background:#fafcf8}
+
+/* On phones, the workspace page owns vertical scrolling during file previews. */
+@media(max-width:700px){
+  .workspace-page-shell{-webkit-overflow-scrolling:touch}
+  .workspace-page.modal,.workspace-page.modal.wide{height:auto;min-height:100dvh}
+  .file-preview .preview-code{max-height:none;overflow-x:auto;overflow-y:visible;touch-action:pan-x pan-y}
+  .file-preview .archive-list{max-height:none;overflow:visible}
+}
