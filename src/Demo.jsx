@@ -3,18 +3,33 @@ import { UploadCloud, Plus, Trash2, FileText, Download, Pencil, Send, CheckCircl
 import { api, uploadFile } from './api';
 import { FilePreview } from './FilePreview';
 import { createRequestId } from './request-id.mjs';
+import { RequirementPicker } from './Requirements';
 import { Modal, ErrorBox, Badge, Avatar, FileIcon, Loading, Empty, bytes, date, actionLabels, roleLabels } from './components';
 
 const blank = { title: '', summary: '', category: '', tags: [], content: '', usage: '', costEstimate: '', difficulty: '', notes: '', changes: '', schemaVersion: 1 };
-export function Editor({ asset, version, user, config, onClose, onSaved }) {
+export function Editor({ asset, version, user, config, requirementIds: initialRequirementIds = [], requirements: initialRequirements = [], onClose, onSaved }) {
   const [form, setForm] = useState(version?.description || blank), [tags, setTags] = useState(version?.description.tags?.join('，') || ''), [pending, setPending] = useState([]), [existing, setExisting] = useState(version?.files || []);
   const [assetId, setAssetId] = useState(asset?.id), [versionId, setVersionId] = useState(version?.id), [revision, setRevision] = useState(version?.revision || 0);
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [progress, setProgress] = useState(null), [dragging, setDragging] = useState(false), [dirty, setDirty] = useState(false);
   const [conflict, setConflict] = useState(false);
+  const [requirementIds, setRequirementIds] = useState(asset?.requirements?.map(item => item.id) || initialRequirementIds), [assetRevision, setAssetRevision] = useState(asset?.revision || 0);
   const [aiJob, setAiJob] = useState(null), [aiDraft, setAiDraft] = useState(''), [aiError, setAiError] = useState('');
-  useEffect(() => { if (!versionId) return; api(`/versions/${versionId}/description/jobs/latest`).then(job => { if (job) { setAiJob(job); setAiDraft(job.result.markdown); } }).catch(() => {}); }, [versionId]);
-  useEffect(() => { if (!aiJob || ['complete','failed'].includes(aiJob.status)) return; const check = async () => { try { const job = await api(`/description/jobs/${aiJob.id}`); setAiJob(job); if (job.status === 'complete') setAiDraft(job.result.markdown); if (job.status === 'failed') setAiError(job.error); } catch (e) { setAiError(e.message); } }; const timer = setInterval(check, 2000); check(); return () => clearInterval(timer); }, [aiJob?.id, aiJob?.status]);
-  async function reloadVersion() { if (!window.confirm('重新加载会覆盖当前未保存的数据说明，待上传文件会保留。是否继续？')) return; setBusy(true); try { const data = await api(`/assets/${assetId}`); const latest = data.versions.find(v => v.id === versionId); if (!latest || !data.canEdit || !['draft', 'returned', 'pending'].includes(latest.status) || (latest.status === 'pending' && !data.canManage)) { setError('当前版本已不允许编辑，请关闭窗口后查看最新状态。'); return; } setForm(latest.description); setTags(latest.description.tags.join('，')); setExisting(latest.files); setRevision(latest.revision); setConflict(false); setError(''); setDirty(pending.length > 0); } catch (e) { setError(e.message); } finally { setBusy(false); } }
+  useEffect(() => { if (!versionId) return; let cancelled = false; api(`/versions/${versionId}/description/jobs/latest`).then(job => { if (cancelled || !job) return; setAiJob(job); setAiDraft(job.result?.markdown || ''); setAiError(job.error || ''); }).catch(error => { if (!cancelled) setAiError(error.message); }); return () => { cancelled = true; }; }, [versionId]);
+  useEffect(() => {
+    if (!aiJob || ['complete','failed'].includes(aiJob.status)) return;
+    let cancelled = false, timer;
+    const check = async () => {
+      try {
+        const job = await api(`/description/jobs/${aiJob.id}`); if (cancelled) return;
+        setAiJob(job); setAiError(job.error || '');
+        if (job.status === 'complete') setAiDraft(job.result?.markdown || '');
+        if (['complete','failed'].includes(job.status)) return;
+      } catch (error) { if (cancelled) return; setAiError(error.message); }
+      timer = setTimeout(check, 2000);
+    };
+    check(); return () => { cancelled = true; clearTimeout(timer); };
+  }, [aiJob?.id, aiJob?.status]);
+  async function reloadVersion() { if (!window.confirm('重新加载会覆盖当前未保存的数据说明和需求绑定，待上传文件会保留。是否继续？')) return; setBusy(true); try { const data = await api(`/assets/${assetId}`); const latest = data.versions.find(v => v.id === versionId); if (!latest || !data.canEdit || !['draft', 'returned', 'pending'].includes(latest.status) || (latest.status === 'pending' && !data.canManage)) { setError('当前版本已不允许编辑，请关闭窗口后查看最新状态。'); return; } setForm(latest.description); setTags(latest.description.tags.join('，')); setExisting(latest.files); setRevision(latest.revision); setRequirementIds(data.requirements.map(item => item.id)); setAssetRevision(data.revision); setConflict(false); setError(''); setDirty(pending.length > 0); } catch (e) { setError(e.message); } finally { setBusy(false); } }
   const input = useRef();
   const requestId = useRef(null);
   if (!requestId.current) requestId.current = createRequestId();
@@ -30,7 +45,7 @@ export function Editor({ asset, version, user, config, onClose, onSaved }) {
   }
   async function removeFile(file) {
     if (!window.confirm(`从当前草稿移除「${file.name}」？历史版本不会改变。`)) return;
-    setBusy(true); try { await api(`/versions/${versionId}/files/${file.id}`, { method: 'DELETE', body: { revision } }); setExisting(fs => fs.filter(f => f.id !== file.id)); setRevision(r => r + 1); } catch (e) { setError(e.message); if (e.status === 409) setConflict(true); } finally { setBusy(false); }
+    setBusy(true); try { await api(`/versions/${versionId}/files/${file.id}`, { method: 'DELETE', body: { revision } }); setExisting(fs => fs.filter(f => f.id !== file.id)); setRevision(r => r + 1); setAssetRevision(value => value + 1); } catch (e) { setError(e.message); if (e.status === 409) setConflict(true); } finally { setBusy(false); }
   }
   async function generateDescription() {
     setAiError(''); setAiDraft('');
@@ -43,12 +58,12 @@ export function Editor({ asset, version, user, config, onClose, onSaved }) {
     let aid = assetId, vid = versionId, rev = revision;
     try {
       const description = { ...form, tags: [...new Set(tags.split(/[,，]/).map(t => t.trim()).filter(Boolean))] };
-      if (!aid) { const result = await api('/assets', { method: 'POST', body: { description, requestId: requestId.current } }); aid = result.id; vid = result.versionId; setAssetId(aid); setVersionId(vid); }
-      else { await api(`/versions/${vid}`, { method: 'PUT', body: { revision: rev, description } }); rev++; setRevision(rev); }
+      if (!aid) { const result = await api('/assets', { method: 'POST', body: { description, requirementIds, requestId: requestId.current } }); aid = result.id; vid = result.versionId; setAssetId(aid); setVersionId(vid); }
+      else { await api(`/versions/${vid}`, { method: 'PUT', body: { revision: rev, assetRevision, description, requirementIds } }); rev++; setRevision(rev); setAssetRevision(value => value + 1); }
       for (const item of pending) {
         setProgress({ name: item.file.name, percent: 0 });
         const result = await uploadFile(vid, item.file, rev, percent => setProgress({ name: item.file.name, percent }));
-        rev = result.revision; setRevision(rev); setExisting(files => [...files, { id: result.id, name: item.file.name, size: item.file.size }]); setPending(list => list.filter(p => p.id !== item.id));
+        rev = result.revision; setRevision(rev); setAssetRevision(value => value + 1); setExisting(files => [...files, { id: result.id, name: item.file.name, size: item.file.size }]); setPending(list => list.filter(p => p.id !== item.id));
       }
       setDirty(false); onSaved(aid);
     } catch (e) { if (e.status === 409) setConflict(true); setError(`${e.message}${aid && e.status !== 409 ? '。已保存的内容仍保留，未完成文件可继续重试。' : ''}`); }
@@ -59,6 +74,7 @@ export function Editor({ asset, version, user, config, onClose, onSaved }) {
     <label className="field">Demo 名称 <b>*</b><input maxLength={120} value={form.title} onChange={e => change('title', e.target.value)} placeholder="例如：零售门店销售分析样例" disabled={busy}/></label>
     <div className="form-grid"><label className="field">业务分类 <b>*</b><select value={form.category} onChange={e => change('category', e.target.value)} disabled={busy}><option value="">选择业务分类</option>{config?.categories.map(c => <option key={c}>{c}</option>)}{form.category && !config?.categories.includes(form.category) && <option>{form.category}</option>}</select></label><label className="field">标签 <span className="optional">选填</span><input value={tags} onChange={e => { setTags(e.target.value); setDirty(true); }} placeholder="例如：销售分析，客户画像" disabled={busy}/></label></div>
     <label className="field">简介 <b>*</b><textarea rows={2} maxLength={500} value={form.summary} onChange={e => change('summary', e.target.value)} placeholder="一句话说明数据包含什么、适合什么场景" disabled={busy}/></label>
+    <RequirementPicker value={requirementIds} initialItems={asset?.requirements || initialRequirements} onChange={ids => { setRequirementIds(ids); setDirty(true); }} disabled={busy || conflict}/>
     <div className="section-heading"><span>02</span><div><h3>Demo 文件</h3><p>支持压缩包及任意类型文件，按原文件保存。</p></div></div>
     <div className={`dropzone ${dragging ? 'dragging' : ''}`} onDragOver={e => { e.preventDefault(); if (!busy) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); if (!busy) choose(e.dataTransfer.files); }}><UploadCloud size={32}/><strong>拖拽文件到这里，或<button type="button" className="inline-link" disabled={busy} onClick={() => input.current.click()}>点击上传</button></strong><p>单文件 ≤ {config?.maxFileMB} MB · 最多 {config?.maxFiles} 个文件 · 总大小 ≤ {config?.maxVersionMB} MB</p><input ref={input} type="file" multiple hidden onChange={e => { choose(e.target.files); e.target.value = ''; }}/></div>
     <div className="editor-files">{existing.map(f => <div className="file-row" key={f.id}><FileIcon name={f.name}/><div><strong>{f.name}</strong><small>{bytes(f.size)} · 已保存</small></div><button type="button" className="icon-button danger-text" aria-label={`移除 ${f.name}`} disabled={busy} onClick={() => removeFile(f)}><Trash2 size={17}/></button></div>)}{pending.map(item => <div className="file-row" key={item.id}><FileIcon name={item.file.name}/><div><strong>{item.file.name}</strong><small>{bytes(item.file.size)} · 等待上传</small></div><button type="button" className="icon-button" aria-label={`取消 ${item.file.name}`} disabled={busy} onClick={() => setPending(list => list.filter(p => p.id !== item.id))}><X size={17}/></button></div>)}</div>
@@ -75,7 +91,7 @@ export function Editor({ asset, version, user, config, onClose, onSaved }) {
     </div><footer className="modal-footer"><span>可先保存草稿，完善后再提交或发布</span><button type="button" className="button" onClick={close} disabled={busy}>取消</button><button type="submit" className="button primary" disabled={busy || conflict}>{busy ? <LoaderCircle size={17} className="spin"/> : <FileText size={17}/>} {busy ? '正在保存…' : '保存 Demo'}</button></footer></form></Modal>;
 }
 
-export function Detail({ id, user, onClose, onEdit, onChanged, notify }) {
+export function Detail({ id, user, onClose, onEdit, onChanged, onOpenRequirement, notify }) {
   const [preview, setPreview] = useState(null);
   const [asset, setAsset] = useState(null), [selected, setSelected] = useState(null), [tab, setTab] = useState('description'), [error, setError] = useState(''), [busy, setBusy] = useState(false), [confirm, setConfirm] = useState(null), [reason, setReason] = useState(''), [reviewers,setReviewers]=useState([]), [supervisorId,setSupervisorId]=useState(''), [candidates,setCandidates]=useState([]), [grantUser,setGrantUser]=useState(''), [grantLevel,setGrantLevel]=useState('readonly'), [ccCandidates,setCcCandidates]=useState([]), [ccUserIds,setCcUserIds]=useState([]), [ccRole,setCcRole]=useState('all');
   async function load(openLatest = false) { try { const result = await api(`/assets/${id}`); setAsset(result); setSelected(old => openLatest || !result.versions.some(v => v.id === old) ? result.latest.id : old); } catch (e) { setError(e.message); } }
@@ -103,6 +119,7 @@ export function Detail({ id, user, onClose, onEdit, onChanged, notify }) {
   return <Modal title={description?.title || 'Demo 详情'} subtitle={asset ? `创建人 ${asset.creator.name} · ${date(asset.createdAt)}` : '正在获取数据'} onClose={onClose} wide busy={busy}>
     <div className="detail-body"><ErrorBox>{error}</ErrorBox>{!asset || !version ? error ? <button className="button" onClick={() => { setError(''); load(); }}>重新加载</button> : <Loading/> : <>
       <div className="detail-overview"><div><span className="category-tag">{description.category || '未分类'}</span>{description.tags.map(t => <span className="tag" key={t}>{t}</span>)}<p>{description.summary || '暂无简介'}</p></div><div className="detail-owner"><Avatar user={asset.owner}/><div><small>归属人</small><strong>{asset.owner.name}</strong></div></div></div>
+      <section className="requirement-picker"><div className="requirement-picker-heading"><strong>关联需求</strong><span>绑定关系适用于整个 Demo，各版本共用</span></div>{asset.requirements.length ? <div className="requirement-links">{asset.requirements.map(item => <button type="button" key={item.id} onClick={() => onOpenRequirement(item.id)}>{item.title}{item.status === 'closed' && '（已关闭）'}<ArrowUpRight size={14}/></button>)}</div> : <p className="muted">尚未绑定需求，提交或发布前请先关联。可在编辑页选择需求，或由需求发布人在需求中心补绑。</p>}</section>
       <div className="version-bar"><Layers3 size={20}/><label>查看版本<select aria-label="选择版本" value={selected} onChange={e => setSelected(e.target.value)}>{asset.versions.map(v => <option key={v.id} value={v.id}>V{v.number}{v.id === asset.currentVersionId ? ' · 当前发布' : ''}</option>)}</select></label><Badge status={version.status}/><span className="version-time">更新于 {date(version.updatedAt)}</span></div>
       {version.status === 'returned' && returnedEvent && <div className="return-note"><RotateCcw size={18}/><div><strong>主管退回意见</strong><p>{returnedEvent.detail.reason}</p></div></div>}
       {version.status === 'offline' && <div className="return-note"><ShieldCheck size={18}/><div><strong>此版本已下架</strong><p>历史内容保留，文件停止下载。需要继续使用时，请由主管恢复发布。</p></div></div>}
@@ -124,7 +141,7 @@ export function Detail({ id, user, onClose, onEdit, onChanged, notify }) {
       {asset.owner.id === user.id && !asset.canManage && version.status === 'pending' && <button className="button" disabled={busy} onClick={() => requestAction('withdraw')}>撤回提交</button>}
       {canEdit && version.status === 'draft' && !version.submissionCount && <button className="icon-button danger-text" aria-label="删除草稿" title="删除草稿" disabled={busy} onClick={() => requestAction('delete')}><Trash2 size={17}/></button>}
     </footer>}
-    {confirm && <div className="confirm-panel" role="alertdialog" aria-label="确认操作"><div><h3>{confirm === 'delete' ? '删除未提交草稿' : actionLabels[confirm]}</h3><p>{({ publish: '将当前文件及说明发布为可使用版本，发布后只能通过新版本修改。', submit: '请选择本次负责审核的主管，提交后文件与说明将锁定。', reject: '请写明需要员工补充或调整的内容。', unpublish: '下架后此版本文件将停止下载，历史记录保留。', restore: '恢复后当前版本重新允许下载，并设为默认版本。', withdraw: '撤回后恢复为草稿，可以继续修改。', delete: '删除后此草稿不再显示，无法从页面恢复。', set_default: '将此已发布版本设为默认使用版本。' })[confirm]}</p>{confirm === 'publish' && <div className="field">额外抄送人员 <span className="optional">产品经理将自动收到通知 · 已选 {ccUserIds.length} 人</span><select className="cc-role-filter" aria-label="按身份筛选抄送人员" value={ccRole} onChange={e => setCcRole(e.target.value)}><option value="all">全部身份</option>{Object.entries(roleLabels).filter(([role]) => role !== 'pm').map(([role,label]) => <option key={role} value={role}>{label}</option>)}</select><div className="cc-options">{ccCandidates.filter(person => ccRole === 'all' || person.roles.includes(ccRole)).length ? ccCandidates.filter(person => ccRole === 'all' || person.roles.includes(ccRole)).map(person => <label key={person.id}><input type="checkbox" checked={ccUserIds.includes(person.id)} onChange={e => setCcUserIds(ids => e.target.checked ? [...ids, person.id] : ids.filter(id => id !== person.id))}/><span>{person.name}</span></label>) : <p className="muted">暂无其他可抄送成员</p>}</div></div>}{confirm === 'submit' && <label className="field">审核主管<select value={supervisorId} onChange={e => setSupervisorId(e.target.value)}><option value="">请选择主管</option>{reviewers.filter(p => p.id !== user.id).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}{needsReason && <textarea autoFocus rows={3} aria-label="处理原因" placeholder="请输入处理原因（必填）" value={reason} onChange={e => setReason(e.target.value)}/>}<div><button className="button" disabled={busy} onClick={() => setConfirm(null)}>取消</button><button className="button primary" disabled={busy || (needsReason && !reason.trim()) || (confirm === 'submit' && !supervisorId)} onClick={() => act(confirm)}>{busy ? '处理中…' : '确认操作'}</button></div></div></div>}
+    {confirm && <div className="confirm-panel" role="alertdialog" aria-label="确认操作"><div><h3>{confirm === 'delete' ? '删除未提交草稿' : actionLabels[confirm]}</h3><p>{({ publish: '将当前文件及说明发布为可使用版本，发布后只能通过新版本修改。', submit: '请选择本次负责审核的主管，提交后文件与说明将锁定。', reject: '请写明需要员工补充或调整的内容。', unpublish: '下架后此版本文件将停止下载，历史记录保留。', restore: '恢复后当前版本重新允许下载，并设为默认版本；全部产品经理及关联需求的商务发布人会收到飞书通知。', withdraw: '撤回后恢复为草稿，可以继续修改。', delete: '删除后此草稿不再显示，无法从页面恢复。', set_default: '将此已发布版本设为默认使用版本。' })[confirm]}</p>{confirm === 'publish' && <div className="field">额外抄送人员 <span className="optional">全部产品经理及关联需求的商务发布人会自动收到通知 · 已选 {ccUserIds.length} 人</span><select className="cc-role-filter" aria-label="按身份筛选抄送人员" value={ccRole} onChange={e => setCcRole(e.target.value)}><option value="all">全部身份</option>{Object.entries(roleLabels).filter(([role]) => role !== 'pm').map(([role,label]) => <option key={role} value={role}>{label}</option>)}</select><div className="cc-options">{ccCandidates.filter(person => ccRole === 'all' || person.roles.includes(ccRole)).length ? ccCandidates.filter(person => ccRole === 'all' || person.roles.includes(ccRole)).map(person => <label key={person.id}><input type="checkbox" checked={ccUserIds.includes(person.id)} onChange={e => setCcUserIds(ids => e.target.checked ? [...ids, person.id] : ids.filter(id => id !== person.id))}/><span>{person.name}</span></label>) : <p className="muted">暂无其他可抄送成员</p>}</div></div>}{confirm === 'submit' && <label className="field">审核主管<select value={supervisorId} onChange={e => setSupervisorId(e.target.value)}><option value="">请选择主管</option>{reviewers.filter(p => p.id !== user.id).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}{needsReason && <textarea autoFocus rows={3} aria-label="处理原因" placeholder="请输入处理原因（必填）" value={reason} onChange={e => setReason(e.target.value)}/>}<div><button className="button" disabled={busy} onClick={() => setConfirm(null)}>取消</button><button className="button primary" disabled={busy || (needsReason && !reason.trim()) || (confirm === 'submit' && !supervisorId)} onClick={() => act(confirm)}>{busy ? '处理中…' : '确认操作'}</button></div></div></div>}
   </Modal>;
 }
 function MarkdownText({ value }) {

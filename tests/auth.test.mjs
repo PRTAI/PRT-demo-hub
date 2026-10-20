@@ -6,6 +6,31 @@ import path from 'node:path';
 import request from 'supertest';
 import { createApp } from '../server/app.mjs';
 
+test('Feishu login keeps the configured entry origin through token exchange and requests document scopes only when enabled', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-oauth-entry-'));
+  const publicOrigin = 'http://data.prt-ai.cn:8001', intranetOrigin = 'http://192.168.110.25:8001';
+  const exchanged = [];
+  const { app, store, config } = createApp({ demoMode: false, production: false, dataDir: root, origin: publicOrigin, publicOrigin, intranetOrigin, appId: 'cli_test', appSecret: 'test-only', tenantKey: 'allowed-enterprise', bootstrapIds: [], fetch: async (url, options) => {
+    if (url.endsWith('/oauth/token')) { exchanged.push(JSON.parse(options.body).redirect_uri); return { ok: true, json: async () => ({ access_token: 'fake-user-token', expires_in: 7200 }) }; }
+    return { ok: true, json: async () => ({ code: 0, data: { open_id: 'ou_entry_user', name: '入口测试', tenant_key: 'allowed-enterprise' } }) };
+  } });
+  t.after(() => { store.db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  for (const entry of [publicOrigin, intranetOrigin]) {
+    const agent = request.agent(app), host = new URL(entry).host;
+    config.feishuDocumentPreview = entry === intranetOrigin;
+    const begin = await agent.get('/api/auth/feishu').set('Host', host).expect(302);
+    const authorize = new URL(begin.headers.location);
+    assert.equal(authorize.searchParams.get('redirect_uri'), entry + '/api/auth/callback');
+    assert.equal(authorize.searchParams.get('scope'), config.feishuDocumentPreview ? 'docx:document:readonly wiki:wiki:readonly' : null);
+    const callback = await agent.get('/api/auth/callback').set('Host', host).query({ state: authorize.searchParams.get('state'), code: 'test-code' }).expect(302);
+    assert.equal(callback.headers.location, '/');
+    assert.equal((await agent.get('/api/auth/me').set('Host', host)).body.user.name, '入口测试');
+  }
+  assert.deepEqual(exchanged, [publicOrigin, intranetOrigin].map(entry => entry + '/api/auth/callback'));
+  const unknown = await request(app).get('/api/auth/feishu').set('Host', 'unconfigured.example').expect(302);
+  assert.equal(new URL(unknown.headers.location).searchParams.get('redirect_uri'), publicOrigin + '/api/auth/callback');
+});
+
 test('Feishu callback validates browser-bound state, tenant, replay and bootstrap identity', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-oauth-'));
   let tenant = 'allowed-enterprise', openId = 'ou_initial_admin', calls = 0;

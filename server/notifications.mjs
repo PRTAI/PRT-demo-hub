@@ -6,6 +6,7 @@ const messageTemplates = {
   set_default: ['Demo 默认版本已变更', '该版本已设为默认发布版本。'],
   description_generated: ['AI 数据说明已生成', '数据说明已生成，请进入应用审查并决定是否应用到草稿。']
 };
+const publicationActions = ['publish', 'restore'];
 export function feishuAppLink(appId, assetId) {
   const link = new URL('https://applink.feishu.cn/client/web_app/open');
   link.searchParams.set('appId', appId);
@@ -26,13 +27,19 @@ export function createNotifications(store, config) {
     if (!messageTemplates[action]) return;
     const owner = one('SELECT * FROM users WHERE id=?', asset.owner_id);
     const supervisor = one('SELECT * FROM users WHERE id=?', one('SELECT reviewer_id FROM versions WHERE id=?',version.id)?.reviewer_id || '');
-    const pms = all('SELECT * FROM users WHERE enabled=1').filter(user => parse(user.roles,[]).includes('pm'));
+    const enabledUsers = all('SELECT * FROM users WHERE enabled=1');
+    const pms = enabledUsers.filter(user => parse(user.roles,[]).includes('pm'));
+    const publication = publicationActions.includes(action);
+    const requirements = publication ? all('SELECT r.id,r.title,r.publisher_id AS publisherId FROM requirements r JOIN asset_requirements ar ON ar.requirement_id=r.id WHERE ar.asset_id=? ORDER BY r.created_at,r.id',asset.id) : [];
+    const businessPublishers = publication ? enabledUsers.filter(user => parse(user.roles,[]).includes('business') && requirements.some(requirement => requirement.publisherId === user.id)) : [];
     const cc = action==='publish' ? all('SELECT u.* FROM version_cc c JOIN users u ON u.id=c.user_id WHERE c.version_id=?',version.id) : [];
     let users = ['submit','withdraw'].includes(action) ? [supervisor] : action === 'reject' ? [owner] : [owner,...pms,...cc];
-    users = [...new Map(users.filter(user => user?.enabled && user.id !== actor.id).map(user => [user.id,user])).values()];
+    users = [...users.filter(user => user?.id !== actor.id), ...(publication ? [...pms,...businessPublishers] : [])];
+    users = [...new Map(users.filter(user => user?.enabled).map(user => [user.id,user])).values()];
     const eventSequence = action === 'submit' ? workflowRound : version.revision + 1;
-    for (const user of users) run('INSERT OR IGNORE INTO notifications(id,version_id,kind,round,recipient_id,detail,created_at) VALUES(?,?,?,?,?,?,?)',uid(),version.id,action,eventSequence,user.id,JSON.stringify({...detail,workflowRound}),now());
-    if (!users.length) run('INSERT OR IGNORE INTO notifications(id,version_id,kind,round,recipient_id,status,error,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?)',uid(),version.id,action,eventSequence,'','skipped','没有可通知的对应人员',JSON.stringify({...detail,workflowRound}),now());
+    const messageDetail = JSON.stringify({...detail,workflowRound,...(publication ? { requirements: requirements.map(({id,title}) => ({id,title})) } : {})});
+    for (const user of users) run('INSERT OR IGNORE INTO notifications(id,version_id,kind,round,recipient_id,detail,created_at) VALUES(?,?,?,?,?,?,?)',uid(),version.id,action,eventSequence,user.id,messageDetail,now());
+    if (!users.length) run('INSERT OR IGNORE INTO notifications(id,version_id,kind,round,recipient_id,status,error,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?)',uid(),version.id,action,eventSequence,'','skipped','没有可通知的对应人员',messageDetail,now());
   }
   function enqueueDirect(action, version, recipient, sequence, detail = {}) {
     if (!messageTemplates[action] || !recipient?.enabled) return;
@@ -55,13 +62,15 @@ export function createNotifications(store, config) {
       for(const job of all("SELECT * FROM notifications WHERE status='pending' AND next_at<=? ORDER BY created_at LIMIT 10",Date.now())) {
         const version=one('SELECT * FROM versions WHERE id=?',job.version_id), asset=version&&one('SELECT * FROM assets WHERE id=?',version.asset_id), owner=asset&&one('SELECT * FROM users WHERE id=?',asset.owner_id), recipient=one('SELECT * FROM users WHERE id=?',job.recipient_id);
         const roles=recipient?parse(recipient.roles,[]):[], isOwner=recipient?.id===owner?.id, isSupervisor=recipient?.id===version?.reviewer_id&&roles.includes('supervisor'), isPm=roles.includes('pm'), isCc=!!one('SELECT 1 FROM version_cc WHERE version_id=? AND user_id=?',version?.id||'',recipient?.id||'');
+        const isBusinessPublisher=publicationActions.includes(job.kind)&&roles.includes('business')&&!!one('SELECT 1 FROM requirements r JOIN asset_requirements ar ON ar.requirement_id=r.id WHERE ar.asset_id=? AND r.publisher_id=? LIMIT 1',asset?.id||'',recipient?.id||'');
         const detail=parse(job.detail,{});
         const stateOk=({submit:version?.status==='pending'&&version.submission_count===job.round,withdraw:version?.status==='draft',reject:version?.status==='returned',publish:version?.status==='published',unpublish:version?.status==='offline',restore:version?.status==='published',set_default:version?.status==='published'&&asset?.current_version_id===version?.id,description_generated:!!version})[job.kind];
-        const audienceOk=job.kind==='description_generated'?true:['submit','withdraw'].includes(job.kind)?isSupervisor:job.kind==='reject'?isOwner:isOwner||isPm||(job.kind==='publish'&&isCc);
+        const audienceOk=job.kind==='description_generated'?true:['submit','withdraw'].includes(job.kind)?isSupervisor:job.kind==='reject'?isOwner:isOwner||isPm||isBusinessPublisher||(job.kind==='publish'&&isCc);
         if(!version||!recipient?.enabled||!audienceOk||!stateOk||recipient.open_id.startsWith('preview:')) { run("UPDATE notifications SET status='skipped',error=? WHERE id=?",'状态或接收人权限已变化，已取消通知',job.id); continue; }
         try {
           const bearer=await tokenFor(), title=parse(version.description).title||'未命名 Demo', [heading,body]=messageTemplates[job.kind];
-          const text=`【${heading}】\n${title}\n版本：V${version.number}\n归属员工：${owner.name}\n${body}${detail.reason?`\n处理意见：${detail.reason}`:''}\n点击进入飞书应用：${feishuAppLink(config.appId,asset.id)}`;
+          const requirementText=detail.requirements?.length?`\n关联需求（发布时）：\n${detail.requirements.map(requirement=>`- ${requirement.title}`).join('\n')}`:'';
+          const text=`【${heading}】\n${title}\n版本：V${version.number}\n归属员工：${owner.name}\n${body}${requirementText}${detail.reason?`\n处理意见：${detail.reason}`:''}\n点击进入飞书应用：${feishuAppLink(config.appId,asset.id)}`;
           const response=await call('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${bearer}`},signal:AbortSignal.timeout(15000),body:JSON.stringify({receive_id:recipient.open_id,msg_type:'text',content:JSON.stringify({text}),uuid:job.id})});
           const data=await response.json(); if(!response.ok||data.code!==0){token='';throw new Error(`飞书发送失败 (${data.code||response.status})，请检查机器人、发送消息权限及应用可用范围`);}
           run("UPDATE notifications SET status='sent',attempts=attempts+1,sent_at=?,error='' WHERE id=?",now(),job.id);

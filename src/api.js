@@ -28,3 +28,13 @@ export function uploadFile(versionId, file, revision, onProgress) {
     const data = new FormData(); data.append('file', file); request.send(data);
   });
 }
+export function uploadRequirementDocument(requirementId, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest(); request.open('POST', `/api/requirements/${requirementId}/documents`);
+    request.setRequestHeader('X-Requested-With', 'PRT'); request.setRequestHeader('X-CSRF-Token', csrf);
+    request.upload.onprogress = e => { if (e.lengthComputable) onProgress?.(Math.round(e.loaded / e.total * 100)); };
+    request.onerror = () => reject(new Error('网络中断，需求文档上传失败，请重试'));
+    request.onload = () => { let body; try { body = JSON.parse(request.responseText); } catch { body = {}; } if (request.status >= 200 && request.status < 300) resolve(body); else reject(failure(body.error || '需求文档上传失败', request.status)); };
+    const data = new FormData(); data.append('file', file); request.send(data);
+  });
+}

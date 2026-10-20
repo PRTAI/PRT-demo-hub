@@ -22,9 +22,101 @@ async function fixture(t, options = {}) {
   return { ...ctx, root, login };
 }
 const description = { title: '测试 Demo', summary: '需求验收数据', category: '通用数据', tags: ['测试'], content: '# 数据概述\n字段和内容说明\n\n# 数据格式\n```text\ndata.csv  # 数据文件\n```', usage: '', costEstimate: '低成本，使用现有工具即可处理。', difficulty: '低难度，具备基础数据分析能力即可。', notes: '', changes: '', schemaVersion: 1 };
-async function create(client) { return (await client.send('post', '/assets', { description }).expect(201)).body; }
+async function create(client) { const requirements = (await client.get('/requirements?status=open').expect(200)).body.items; return (await client.send('post', '/assets', { description, requirementIds: [requirements[0].id] }).expect(201)).body; }
 async function detail(client, id) { return (await client.get('/assets/' + id).expect(200)).body; }
 async function action(client, vid, revision, action, reason = '') { return client.send('post', `/versions/${vid}/actions`, { revision, action, reason }); }
+
+test('my requirements only include assignments, including for product managers and business publishers', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee');
+  const assigned = await publishRequirement(business, { title: '指派给产品经理', assignedUserIds: ['preview-pm'] });
+  const authored = await publishRequirement(pm, { title: '自己发布但未指定自己', assignedUserIds: ['preview-employee'] });
+  const mine = (await pm.get('/requirements?assigned=1').expect(200)).body.items;
+  assert.ok(mine.some(item => item.id === assigned.id)); assert.ok(!mine.some(item => item.id === authored.id));
+  assert.ok((await pm.get('/requirements').expect(200)).body.items.some(item => item.id === authored.id));
+  assert.ok(!(await employee.get('/requirements?assigned=0').expect(200)).body.items.some(item => item.id === assigned.id));
+  assert.ok((await employee.get('/requirements?assigned=1').expect(200)).body.items.some(item => item.id === authored.id));
+});
+
+test('requirement status changes allow PM and business roles, enforce revisions, and keep closed bindings blocked', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-other-manager'), admin = await ctx.login('preview-admin');
+  let requirement = await publishRequirement(business, { assignedUserIds: ['preview-employee', 'preview-other-manager', 'preview-admin'] });
+  for (const client of [employee, manager, admin]) await client.send('post', `/requirements/${requirement.id}/actions`, { revision: requirement.revision, action: 'set_status', status: 'delivered' }).expect(403);
+  for (const status of ['needs_update', 'delivered', 'closed', 'open']) {
+    const previous = requirement.revision;
+    requirement = (await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: previous, action: 'set_status', status }).expect(200)).body;
+    assert.equal(requirement.status, status);
+    assert.ok((await pm.get('/requirements?status=' + status).expect(200)).body.items.some(item => item.id === requirement.id));
+    await business.send('post', `/requirements/${requirement.id}/actions`, { revision: previous, action: 'set_status', status: 'needs_update' }).expect(409);
+  }
+  requirement = (await business.send('post', `/requirements/${requirement.id}/actions`, { revision: requirement.revision, action: 'set_status', status: 'needs_update' }).expect(200)).body;
+  await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201);
+  assert.ok((await employee.get('/requirements?status=active').expect(200)).body.items.some(item => item.id === requirement.id));
+});
+
+test('rejecting a Demo changes only linked open requirements to needs update and publication keeps their status', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm');
+  const first = await publishRequirement(pm), second = await publishRequirement(pm), third = await publishRequirement(pm);
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [first.id, second.id, third.id] }).expect(201)).body;
+  await pm.send('post', `/requirements/${second.id}/actions`, { revision: second.revision, action: 'set_status', status: 'delivered' }).expect(200);
+  await pm.send('post', `/requirements/${third.id}/actions`, { revision: third.revision, action: 'close' }).expect(200);
+  await employee.upload(demo.versionId, 0).expect(201);
+  await action(manager, demo.versionId, 1, 'reject', '无效退回').then(result => assert.equal(result.status, 409));
+  assert.equal((await pm.get(`/requirements/${first.id}`).expect(200)).body.status, 'open');
+  await employee.send('post', `/versions/${demo.versionId}/actions`, { revision: 1, action: 'submit', supervisorId: 'preview-manager' }).expect(200);
+  await action(manager, demo.versionId, 2, 'reject', '补充字段').then(result => assert.equal(result.status, 200));
+  for (const [id, status] of [[first.id, 'needs_update'], [second.id, 'delivered'], [third.id, 'closed']]) assert.equal((await pm.get(`/requirements/${id}`).expect(200)).body.status, status);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM events WHERE action='requirement_status' AND asset_id=?", demo.id).count, 1);
+  await employee.send('post', `/versions/${demo.versionId}/actions`, { revision: 3, action: 'submit', supervisorId: 'preview-manager' }).expect(200);
+  await action(manager, demo.versionId, 4, 'publish').then(result => assert.equal(result.status, 200));
+  assert.equal((await pm.get(`/requirements/${first.id}`).expect(200)).body.status, 'needs_update');
+});
+
+test('Feishu requirement preview enforces assignment and only reads links stored in the requirement', async t => {
+  const ctx = await fixture(t), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee'), other = await ctx.login('preview-other');
+  const url = 'https://team.feishu.cn/wiki/WikiToken';
+  const requirement = await publishRequirement(business, { content: '查看 ' + url, assignedUserIds: ['preview-employee'] });
+  const endpoint = `/requirements/${requirement.id}/link-preview?`;
+  await other.get(endpoint + new URLSearchParams({ url })).expect(403);
+  await employee.get(endpoint + new URLSearchParams({ url: 'https://team.feishu.cn/docx/OtherToken' })).expect(400);
+  await employee.get(endpoint + new URLSearchParams({ url: 'http://127.0.0.1/internal' })).expect(400);
+  const result = (await employee.get(endpoint + new URLSearchParams({ url })).expect(200)).body;
+  assert.equal(result.available, false); assert.equal(result.url, url);
+});
+
+test('admins can disable and delete accounts with history, restore them, and cannot remove the last admin', async t => {
+  const ctx = await fixture(t), admin = await ctx.login('preview-admin'), employee = await ctx.login('preview-employee');
+  const account = id => ctx.store.one('SELECT * FROM users WHERE id=?', id);
+  await employee.send('delete', '/admin/users/preview-other', { revision: 0 }).expect(403);
+  await admin.send('delete', '/admin/users/preview-employee', { revision: 0 }).expect(409);
+  const before = ctx.store.one('SELECT COUNT(*) AS count FROM assets WHERE owner_id=?', 'preview-employee').count;
+  await admin.send('put', '/admin/users/preview-admin', { revision: 0, roles: ['admin'], supervisorId: null, enabled: false }).expect(400);
+  await admin.send('put', '/admin/users/preview-employee', { revision: 0, roles: ['employee'], supervisorId: 'unavailable-supervisor', enabled: false }).expect(200);
+  assert.equal(account('preview-employee').supervisor_id, null);
+  await employee.get('/config').expect(401);
+  await admin.send('delete', '/admin/users/preview-employee', { revision: 0 }).expect(409);
+  await admin.send('delete', '/admin/users/preview-employee', { revision: 1 }).expect(200);
+  assert.ok((await admin.get('/admin/users').expect(200)).body.find(user => user.id === 'preview-employee').deletedAt);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM assets WHERE owner_id=?', 'preview-employee').count, before);
+  assert.ok(account('preview-employee').deleted_at);
+  await admin.send('put', '/admin/users/preview-employee', { revision: 2, roles: ['employee'], supervisorId: null, enabled: true }).expect(409);
+  await admin.send('post', '/admin/users/preview-employee/restore', { revision: 2 }).expect(200);
+  assert.equal(account('preview-employee').enabled, 0); assert.equal(account('preview-employee').deleted_at, null);
+  await admin.send('put', '/admin/users/preview-manager', { revision: 0, roles: ['supervisor', 'pm'], supervisorId: null, enabled: false }).expect(200);
+  assert.equal(account('preview-colleague').supervisor_id, null);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('network discovery is public with narrowly allowed CORS while both configured origins retain CSRF checks', async t => {
+  const publicOrigin = 'http://data.prt-ai.cn:8001', intranetOrigin = 'http://192.168.110.25:8001';
+  const ctx = await fixture(t, { publicOrigin, intranetOrigin }), employee = await ctx.login('preview-employee');
+  const response = await request(ctx.app).get('/api/network').set('Origin', publicOrigin).expect(200);
+  assert.equal(response.body.intranetOrigin, intranetOrigin); assert.equal(response.headers['access-control-allow-origin'], publicOrigin);
+  const foreign = await request(ctx.app).get('/api/network').set('Origin', 'https://attacker.example').expect(200);
+  assert.equal(foreign.headers['access-control-allow-origin'], undefined);
+  await request(ctx.app).options('/api/network').set('Origin', publicOrigin).expect(204);
+  await employee.agent.post('/api/assets').set('Origin', publicOrigin).set('X-Requested-With', 'PRT').send({ description }).expect(403);
+  await employee.send('post', '/assets', { description }).expect(201);
+});
 
 test('identity: anonymous denied, unassigned waiting, production never allows preview', async t => {
   const f = await fixture(t);
@@ -230,7 +322,7 @@ test('Feishu notifications queue atomically, deliver to supervisor then PM, and 
   await owner.send('post',`/versions/${demo.versionId}/actions`,{revision:1,action:'submit'}).expect(409);
   assert.equal(ctx.notifications.list().length,1);
   await manager.send('post',`/versions/${demo.versionId}/actions`,{revision:2,action:'publish'}).expect(200);
-  assert.equal(ctx.notifications.list().filter(n=>n.kind==='publish').length,2);
+  assert.equal(ctx.notifications.list().filter(n=>n.kind==='publish').length,3);
   const {createNotifications} = await import('../server/notifications.mjs');
   ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
   let calls=[], fail=true;
@@ -246,15 +338,18 @@ test('Feishu notifications queue atomically, deliver to supervisor then PM, and 
   fail=false;ctx.store.run('UPDATE notifications SET next_at=0');
   await sender.drain();
   assert.equal(sender.list().find(n=>n.kind==='publish').status,'sent');
-  assert.equal(calls[0].uuid,calls[2].uuid);
-  assert.ok(JSON.parse(calls[2].content).text.includes('审核通过'));
-  const appMessage=JSON.parse(calls[2].content).text;
+  for (const job of sender.list().filter(item => item.kind === 'publish')) {
+    const attempts = calls.filter(call => call.uuid === job.id);
+    assert.equal(attempts.length, 2); assert.equal(job.status, 'sent');
+  }
+  assert.ok(JSON.parse(calls[0].content).text.includes('审核通过'));
+  const appMessage=JSON.parse(calls[0].content).text;
   assert.ok(appMessage.includes('https://applink.feishu.cn/client/web_app/open?'));
   assert.ok(appMessage.includes('appId=test'));
   assert.ok(appMessage.includes('mode=appCenter'));
   assert.ok(appMessage.includes(`demo=${demo.id}`));
   assert.ok(!appMessage.includes(origin));
-  await sender.drain();assert.equal(calls.length,4);
+  await sender.drain();assert.equal(calls.length,6);
   await owner.get('/admin/notifications').expect(403);
 });
 
@@ -275,7 +370,8 @@ test('all workflow transitions queue notifications for the responsible people', 
   for(const kind of ['submit','reject','withdraw','publish','unpublish','restore','set_default']) assert.ok(kinds.has(kind),`missing ${kind}`);
   const reject=jobs.find(job=>job.kind==='reject'); assert.equal(reject.recipient_id,'preview-employee'); assert.equal(JSON.parse(reject.detail).reason,'请补充字段口径');
   assert.ok(jobs.filter(job=>job.kind==='submit').every(job=>job.recipient_id==='preview-manager'));
-  for(const kind of ['publish','unpublish','restore','set_default']) assert.deepEqual(new Set(jobs.filter(job=>job.kind===kind).map(job=>job.recipient_id)),new Set(['preview-employee','preview-pm']));
+  for(const kind of ['publish','restore']) assert.deepEqual(new Set(jobs.filter(job=>job.kind===kind).map(job=>job.recipient_id)),new Set(['preview-employee','preview-manager','preview-pm']));
+  for(const kind of ['unpublish','set_default']) assert.deepEqual(new Set(jobs.filter(job=>job.kind===kind).map(job=>job.recipient_id)),new Set(['preview-employee','preview-pm']));
 });
 
 test('dashboard status shortcuts can query the matching incomplete list', async t => {
@@ -348,7 +444,8 @@ test('RAG search only returns visible descriptions and can use an LLM answer', a
 test('RAG search excludes offline Demos', async t => {
   const ctx = await fixture(t), manager = await ctx.login('preview-manager');
   const marker = 'OFFLINESEARCHZXQ999';
-  const demo = (await manager.send('post', '/assets', { description: { ...description, title: '待下架检索样例', content: marker } }).expect(201)).body;
+  const requirementId = (await manager.get('/requirements').expect(200)).body.items[0].id;
+  const demo = (await manager.send('post', '/assets', { description: { ...description, title: '待下架检索样例', content: marker }, requirementIds: [requirementId] }).expect(201)).body;
   await manager.upload(demo.versionId, 0).expect(201);
   assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
   let result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
@@ -356,6 +453,65 @@ test('RAG search excludes offline Demos', async t => {
   assert.equal((await action(manager, demo.versionId, 2, 'unpublish', '停止使用')).status, 200);
   result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
   assert.ok(!result.body.sources.some(asset => asset.id === demo.id));
+});
+
+test('RAG uses official DeepSeek Pro with thinking disabled through multiple tool rounds', async t => {
+  const calls = [];
+  const ctx = await fixture(t, { llmApiKey: 'official-test-key', fetch: async (url, options) => {
+    const body = JSON.parse(options.body); calls.push({ url, body });
+    assert.equal(url, 'https://api.deepseek.com/chat/completions');
+    assert.equal(options.headers.Authorization, 'Bearer official-test-key');
+    assert.equal(body.model, 'deepseek-v4-pro');
+    assert.deepEqual(body.thinking, { type: 'disabled' });
+    assert.equal(Object.hasOwn(body, 'max_tokens'), false);
+    if (calls.length === 1) return new Response(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [{ id: 'search-1', type: 'function', function: { name: 'search_demos', arguments: JSON.stringify({ query: '销售' }) } }] } }] }));
+    const tool = body.messages.find(message => message.role === 'tool');
+    assert.ok(tool);
+    return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '建议使用门店销售数据 [1]。' } }] }));
+  } });
+  const employee = await ctx.login('preview-employee');
+  const result = await employee.send('post', '/search/rag', { question: '门店销售分析' }).expect(200);
+  assert.equal(result.body.modelUsed, true);
+  assert.equal(result.body.modelError, '');
+  assert.equal(calls.length, 2);
+  assert.ok(result.body.sources.length > 0);
+  assert.ok(result.body.sources.every(asset => asset.owner.id === 'preview-employee'));
+});
+
+test('RAG sends token caps only when configured and rejects invalid caps before requesting', async t => {
+  const requests = [];
+  const ctx = await fixture(t, { llmApiKey: 'official-test-key', fetch: async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '测试检索回答' } }] }));
+  } });
+  const employee = await ctx.login('preview-employee');
+  for (const budget of [undefined, null, '', '   ', 4096, '16384']) {
+    ctx.config.llmMaxTokens = budget;
+    const response = await employee.send('post', '/search/rag', { question: '门店销售分析' }).expect(200);
+    assert.equal(response.body.modelUsed, true);
+    const sent = requests.at(-1);
+    if (budget === 4096 || budget === '16384') assert.equal(sent.max_tokens, Number(budget));
+    else assert.equal(Object.hasOwn(sent, 'max_tokens'), false);
+  }
+  const count = requests.length;
+  for (const budget of [0, -1, 1000, 32769, 8192.5, 'invalid']) {
+    ctx.config.llmMaxTokens = budget;
+    const response = await employee.send('post', '/search/rag', { question: '门店销售分析' }).expect(200);
+    assert.equal(response.body.modelUsed, false);
+    assert.match(response.body.modelError, /RAG_LLM_MAX_TOKENS/);
+  }
+  assert.equal(requests.length, count);
+});
+
+test('RAG falls back to local results when the model output is truncated', async t => {
+  const ctx = await fixture(t, { llmApiKey: 'official-test-key', fetch: async () => new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { role: 'assistant', content: '截断的答案' } }] })) });
+  const employee = await ctx.login('preview-employee');
+  const result = await employee.send('post', '/search/rag', { question: '门店销售分析' }).expect(200);
+  assert.equal(result.body.modelUsed, false);
+  assert.match(result.body.modelError, /额度上限/);
+  assert.match(result.body.modelError, /模型服务默认值/);
+  assert.ok(!result.body.answer.includes('截断的答案'));
+  assert.ok(result.body.sources.length > 0);
 });
 
 test('RAG stream emits visible agent retrieval stages before its result', async t => {
@@ -389,12 +545,13 @@ test('description agent runs in background, preserves the draft and queues reque
   await (await ctx.login('preview-other')).send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(404);
 });
 
-test('description agent falls back to OpenAI-compatible text when Claude CLI is unavailable', async t => {
+test('description agent falls back to the API when explicitly selected Claude CLI is unavailable', async t => {
   const markdown = '# 数据概述\n\n本数据用于验证兼容接口。\n\n# 数据格式\n\n```text\ndata.csv  # 数据文件\n```';
   let authorization = '';
   const ctx = await fixture(t, {
     descriptionAgentKey: 'compatible-test-key', descriptionAgentUrl: 'https://agent.test', descriptionAgentModel: 'compatible-test-model',
     descriptionAgentCommand: 'missing-claude-command-for-test',
+    descriptionAgentTransport: 'cli',
     descriptionAgentFetch: async (_url, options) => {
       authorization = options.headers.authorization;
       return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ markdown }) } }] }) };
@@ -409,6 +566,51 @@ test('description agent falls back to OpenAI-compatible text when Claude CLI is 
   assert.equal(authorization, 'Bearer compatible-test-key');
 });
 
+test('description jobs remain discoverable while running and can be retried after timing out', async t => {
+  let calls = 0;
+  const ctx = await fixture(t, {
+    descriptionAgentKey: 'test-key', descriptionAgentUrl: 'https://agent.test', descriptionAgentModel: 'test-model', descriptionAgentTimeoutMs: 150,
+    descriptionAgentRunner: async () => { calls++; return calls === 1 ? new Promise(() => {}) : { markdown: description.content }; }
+  });
+  const owner = await ctx.login('preview-employee'), demo = await create(owner);
+  await owner.upload(demo.versionId, 0, 'data.csv', Buffer.from('id,value\n1,2')).expect(201);
+  const queued = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(202);
+  const latest = await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200);
+  assert.equal(latest.body.id, queued.body.id); assert.equal(latest.body.result, null);
+  const duplicate = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(202);
+  assert.equal(duplicate.body.id, queued.body.id);
+  let job;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    job = (await owner.get(`/description/jobs/${queued.body.id}`).expect(200)).body;
+    if (job.status === 'failed') break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(job.status, 'failed'); assert.match(job.error, /生成超时/);
+  const failed = await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200);
+  assert.equal(failed.body.status, 'failed'); assert.match(failed.body.error, /生成超时/);
+  const retry = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(202);
+  assert.notEqual(retry.body.id, queued.body.id);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    job = (await owner.get(`/description/jobs/${retry.body.id}`).expect(200)).body;
+    if (['complete', 'failed'].includes(job.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(job.status, 'complete'); assert.equal(calls, 2);
+});
+
+test('startup releases description jobs interrupted by a previous server process', async t => {
+  const ctx = await fixture(t), owner = await ctx.login('preview-employee'), demo = await create(owner);
+  for (const status of ['pending', 'running']) ctx.store.run('INSERT INTO description_jobs(id,version_id,requester_id,status,base_revision,created_at) VALUES(?,?,?,?,?,?)', `interrupted-${status}`, demo.versionId, 'preview-employee', status, 0, new Date().toISOString());
+  const restarted = createApp({ dataDir: ctx.store.root, demoMode: true, origin });
+  try {
+    const jobs = restarted.store.all('SELECT status,error,completed_at FROM description_jobs WHERE version_id=?', demo.versionId);
+    assert.equal(jobs.length, 2);
+    assert.ok(jobs.every(job => job.status === 'failed' && job.completed_at && job.error.includes('服务重启')));
+  } finally { restarted.store.db.close(); }
+  const latest = await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200);
+  assert.equal(latest.body.status, 'failed');
+});
+
 test('admin can atomically transfer a filtered selection of assets', async t => {
   const ctx = await fixture(t), admin = await ctx.login('preview-admin'), owner = await ctx.login('preview-employee');
   const first = await create(owner), second = await create(owner);
@@ -421,4 +623,440 @@ test('admin can atomically transfer a filtered selection of assets', async t => 
   const events = ctx.store.all("SELECT detail FROM events WHERE action='transfer' AND asset_id IN (?,?)", first.id, second.id);
   assert.equal(events.length, 2); assert.ok(events.every(e => JSON.parse(e.detail).batchSize === 2));
   await admin.send('post', '/admin/assets/transfer-batch', payload).expect(409);
+});
+
+const requirementContent = { title: '门店经营演示需求', content: '需要门店和订单的合成数据，支持按区域展示销售趋势，并提供清晰的字段说明。', category: '零售与消费' };
+async function publishRequirement(client, extra = {}) { return (await client.send('post', '/requirements', { ...requirementContent, assignedUserIds: ['preview-employee'], ...extra }).expect(201)).body; }
+async function requirementUpload(client, id, contents = Buffer.from('requirement document'), name = '需求说明.txt', status = 201) {
+  const csrf = (await client.agent.get('/api/auth/me')).body.csrf;
+  return client.agent.post(`/api/requirements/${id}/documents`).set('Origin', origin).set('X-Requested-With', 'PRT').set('X-CSRF-Token', csrf).attach('file', contents, name).expect(status);
+}
+
+test('requirement forwarding adds multiple recipients without replacing existing assignments and grants document access', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), manager = await ctx.login('preview-other-manager'), employee = await ctx.login('preview-other'), colleague = await ctx.login('preview-colleague');
+  const requirement = await publishRequirement(pm);
+  const document = await requirementUpload(pm, requirement.id);
+  const owner = await ctx.login('preview-employee');
+  const demo = (await owner.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  const endpoint = `/requirements/${requirement.id}`;
+  await employee.get(endpoint).expect(403);
+  await employee.get(`${endpoint}/documents/${document.body.id}/download`).expect(403);
+  const original = ctx.store.one('SELECT * FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-employee');
+  const forwarded = (await business.send('post', endpoint + '/forward', { revision: document.body.revision, assignedUserIds: ['preview-other-manager', 'preview-colleague', 'preview-colleague'] }).expect(200)).body;
+  assert.deepEqual(forwarded.addedUserIds, ['preview-other-manager', 'preview-colleague']);
+  assert.equal(forwarded.revision, 2);
+  assert.deepEqual(forwarded.assignedUsers.map(user => user.id).sort(), ['preview-employee', 'preview-other-manager', 'preview-colleague'].sort());
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-employee'), original);
+  const managerDetail = (await manager.get(endpoint).expect(200)).body;
+  assert.equal(managerDetail.canForward, true); assert.equal(managerDetail.canManage, false); assert.equal(managerDetail.canStatusManage, false);
+  const next = (await manager.send('post', endpoint + '/forward', { revision: 2, assignedUserIds: ['preview-other', 'preview-colleague'] }).expect(200)).body;
+  assert.deepEqual(next.addedUserIds, ['preview-other']);
+  assert.equal(next.revision, 3); assert.equal(next.assignedUsers.length, 4);
+  for (const client of [employee, colleague]) {
+    assert.equal((await client.get(endpoint).expect(200)).body.canForward, false);
+    assert.ok((await client.get('/requirements?assigned=1').expect(200)).body.items.some(item => item.id === requirement.id));
+    await client.get(`${endpoint}/documents/${document.body.id}/download`).expect(200);
+    await client.get(`/assets/${demo.id}`).expect(404);
+    await client.send('put', endpoint, { ...requirementContent, revision: 3 }).expect(403);
+    await client.send('post', endpoint + '/actions', { revision: 3, action: 'set_status', status: 'delivered' }).expect(403);
+  }
+  const repeat = (await business.send('post', endpoint + '/forward', { revision: 3, assignedUserIds: ['preview-colleague', 'preview-other-manager'] }).expect(200)).body;
+  assert.deepEqual(repeat.addedUserIds, []); assert.equal(repeat.revision, 3);
+  assert.equal(ctx.store.one('SELECT assigned_by FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-other').assigned_by, 'preview-other-manager');
+  const events = ctx.store.all("SELECT actor_id,detail FROM events WHERE action='requirement_forward'");
+  assert.equal(events.length, 2);
+  assert.equal(events[0].actor_id, 'preview-business');
+  assert.deepEqual(JSON.parse(events[1].detail).recipients.map(user => user.id), ['preview-other']);
+  const unchanged = (await pm.get(endpoint).expect(200)).body;
+  assert.equal(unchanged.title, requirement.title); assert.equal(unchanged.content, requirement.content); assert.equal(unchanged.status, requirement.status); assert.equal(unchanged.publisher.id, requirement.publisher.id);
+});
+
+test('PM and business may forward any visible requirement to supervisors and employees but not other role-only accounts', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  for (const actor of [pm, business]) {
+    const requirement = await publishRequirement(actor === pm ? business : pm, { assignedUserIds: [] });
+    const endpoint = `/requirements/${requirement.id}`;
+    const candidates = (await actor.get(endpoint + '/forward-candidates').expect(200)).body;
+    assert.deepEqual(candidates.allowedRoles, ['supervisor', 'employee']);
+    assert.equal(candidates.assignedCount, 0); assert.equal(candidates.revision, 0);
+    assert.ok(candidates.items.some(user => user.id === 'preview-other-manager'));
+    assert.ok(candidates.items.some(user => user.id === 'preview-employee'));
+    for (const id of ['preview-admin', 'preview-pm', 'preview-business', 'preview-unassigned', 'missing-user']) {
+      assert.ok(!candidates.items.some(user => user.id === id));
+      await actor.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: ['preview-employee', id] }).expect(400);
+    }
+    await actor.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: [] }).expect(400);
+    assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_assignees WHERE requirement_id=?', requirement.id).count, 0);
+    const forwarded = (await actor.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: ['preview-other-manager', 'preview-employee'] }).expect(200)).body;
+    assert.equal(forwarded.assignedUsers.length, 2);
+  }
+});
+
+test('supervisors only forward requirements they can view to employees and ordinary recipients cannot forward', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), manager = await ctx.login('preview-other-manager'), employee = await ctx.login('preview-employee'), admin = await ctx.login('preview-admin');
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['supervisor', 'employee']), 'preview-manager');
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-other-manager', 'preview-employee', 'preview-admin'] });
+  const endpoint = `/requirements/${requirement.id}`;
+  const candidates = (await manager.get(endpoint + '/forward-candidates').expect(200)).body;
+  assert.deepEqual(candidates.allowedRoles, ['employee']);
+  assert.ok(candidates.items.some(user => user.id === 'preview-colleague'));
+  assert.equal(candidates.items.find(user => user.id === 'preview-employee').assigned, true);
+  assert.ok(candidates.items.every(user => user.roles.includes('employee') && !user.roles.includes('supervisor')));
+  for (const id of ['preview-manager', 'preview-other-manager', 'preview-pm', 'preview-admin']) {
+    await manager.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: ['preview-colleague', id] }).expect(400);
+  }
+  for (const client of [employee, admin]) {
+    assert.equal((await client.get(endpoint).expect(200)).body.canForward, false);
+    await client.get(endpoint + '/forward-candidates').expect(403);
+    await client.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: ['preview-colleague'] }).expect(403);
+  }
+  const hidden = await publishRequirement(pm, { assignedUserIds: [] });
+  await manager.get(`/requirements/${hidden.id}/forward-candidates`).expect(403);
+  await manager.send('post', `/requirements/${hidden.id}/forward`, { revision: 0, assignedUserIds: ['preview-colleague'] }).expect(403);
+  await manager.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: ['preview-colleague', 'preview-other'] }).expect(200);
+  await manager.send('put', endpoint, { ...requirementContent, revision: 1 }).expect(403);
+  await manager.send('post', endpoint + '/actions', { revision: 1, action: 'set_status', status: 'closed' }).expect(403);
+});
+
+test('forwarding rechecks live roles, account state and access and rejects the whole batch on failure', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), manager = await ctx.login('preview-other-manager');
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-other-manager'] });
+  const endpoint = `/requirements/${requirement.id}`;
+  await manager.get(endpoint + '/forward-candidates').expect(200);
+  for (const update of ["enabled=0", "roles='[\"supervisor\",\"employee\"]'", "deleted_at='2026-10-19T00:00:00Z'"]) {
+    ctx.store.run(`UPDATE users SET ${update} WHERE id=?`, 'preview-colleague');
+    await manager.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: ['preview-employee', 'preview-colleague'] }).expect(400);
+    assert.equal(ctx.store.one('SELECT revision FROM requirements WHERE id=?', requirement.id).revision, 0);
+    assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_assignees WHERE requirement_id=?', requirement.id).count, 1);
+    ctx.store.run('UPDATE users SET enabled=1,roles=?,deleted_at=NULL WHERE id=?', JSON.stringify(['employee']), 'preview-colleague');
+  }
+  await pm.send('put', endpoint, { ...requirementContent, assignedUserIds: [], revision: 0 }).expect(200);
+  await manager.get(endpoint + '/forward-candidates').expect(403);
+  await manager.send('post', endpoint + '/forward', { revision: 1, assignedUserIds: ['preview-employee'] }).expect(403);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM events WHERE action='requirement_forward'").count, 0);
+});
+
+test('forwarding checks revisions so concurrent forwards and stale publisher edits never erase recipients', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  const requirement = await publishRequirement(pm), endpoint = `/requirements/${requirement.id}`;
+  const targets = ['preview-colleague', 'preview-other'];
+  const responses = await Promise.all([pm, business].map((actor, index) => actor.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: [targets[index]] })));
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 409]);
+  const current = (await pm.get(endpoint).expect(200)).body;
+  assert.equal(current.assignedUsers.length, 2); assert.ok(current.assignedUsers.some(user => user.id === 'preview-employee'));
+  await pm.send('put', endpoint, { ...requirementContent, assignedUserIds: ['preview-employee'], revision: 0 }).expect(409);
+  const remaining = targets.filter(id => !current.assignedUsers.some(user => user.id === id));
+  const completed = (await business.send('post', endpoint + '/forward', { revision: current.revision, assignedUserIds: remaining }).expect(200)).body;
+  assert.equal(completed.assignedUsers.length, 3);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('forwarding enforces the total assignee limit without partially applying a batch', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm');
+  const ids = Array.from({ length: 100 }, (_, index) => `forward-employee-${index}`);
+  for (const id of ids) ctx.store.run('INSERT INTO users(id,open_id,name,roles,created_at) VALUES(?,?,?,?,?)', id, 'preview:' + id, id, JSON.stringify(['employee']), new Date().toISOString());
+  const requirement = await publishRequirement(pm, { assignedUserIds: ids.slice(0, 99) }), endpoint = `/requirements/${requirement.id}`;
+  await pm.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: [ids[99], 'preview-other'] }).expect(400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_assignees WHERE requirement_id=?', requirement.id).count, 99);
+  const forwarded = (await pm.send('post', endpoint + '/forward', { revision: 0, assignedUserIds: [ids[99]] }).expect(200)).body;
+  assert.equal(forwarded.assignedUsers.length, 100);
+  const candidates = (await pm.get(endpoint + '/forward-candidates').expect(200)).body;
+  assert.equal(candidates.assignedCount, 100); assert.equal(candidates.maxAssignees, 100);
+  await pm.send('post', endpoint + '/forward', { revision: 1, assignedUserIds: ['preview-other'] }).expect(400);
+});
+
+test('only product managers and business users can publish requirements and publishers manage their own', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  for (const id of ['preview-employee', 'preview-other-manager', 'preview-admin']) {
+    const user = await ctx.login(id);
+    await user.send('post', '/requirements', requirementContent).expect(403);
+  }
+  const requirement = await publishRequirement(pm), businessRequirement = await publishRequirement(business, { title: '商务客户演示需求' });
+  assert.equal(requirement.publisher.id, 'preview-pm'); assert.equal(businessRequirement.publisher.id, 'preview-business');
+  await pm.send('post', '/requirements', { ...requirementContent, title: '  ' }).expect(400);
+  await business.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: 0 }).expect(403);
+  await business.send('post', `/requirements/${requirement.id}/actions`, { revision: 0, action: 'close' }).expect(403);
+  const edited = await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, title: '修订后的需求', revision: 0 }).expect(200);
+  assert.equal(edited.body.revision, 1);
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: 0 }).expect(409);
+  const closed = await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 1, action: 'close' }).expect(200);
+  assert.equal(closed.body.status, 'closed');
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 2, action: 'close' }).expect(409);
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 2, action: 'reopen' }).expect(200);
+  const events = ctx.store.all("SELECT action FROM events WHERE detail LIKE ?", `%${requirement.id}%`).map(item => item.action);
+  for (const action of ['requirement_publish', 'requirement_edit', 'requirement_close', 'requirement_reopen']) assert.ok(events.includes(action));
+});
+
+test('requirements support optional assignees and documents with read-only assigned access', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), admin = await ctx.login('preview-admin'), other = await ctx.login('preview-other');
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-employee', 'preview-admin'] });
+  const pmList = (await pm.get('/requirements')).body.items;
+  assert.ok(pmList.some(item => item.id === requirement.id));
+  const employeeList = (await employee.get('/requirements')).body.items;
+  assert.ok(employeeList.some(item => item.id === requirement.id));
+  const otherList = (await other.get('/requirements')).body.items;
+  assert.ok(!otherList.some(item => item.id === requirement.id));
+  await other.get(`/requirements/${requirement.id}`).expect(403);
+  await employee.send('put', `/requirements/${requirement.id}`, { ...requirementContent, assignedUserIds: [], revision: 0 }).expect(403);
+  const document = await requirementUpload(pm, requirement.id);
+  assert.equal(document.body.revision, 1);
+  const detailData = (await employee.get(`/requirements/${requirement.id}`).expect(200)).body;
+  assert.equal(detailData.documents.length, 1); assert.equal(detailData.documents[0].name, '需求说明.txt');
+  const downloaded = await employee.get(`/requirements/${requirement.id}/documents/${document.body.id}/download`).expect(200);
+  assert.equal(downloaded.text || downloaded.body.toString(), 'requirement document');
+  assert.match(downloaded.headers['content-disposition'], /attachment/);
+  await admin.get(`/requirements/${requirement.id}/documents/${document.body.id}/download`).expect(200);
+  await other.get(`/requirements/${requirement.id}/documents/${document.body.id}/download`).expect(403);
+  for (const client of [employee, admin]) {
+    await client.get('/requirements/assignees').expect(403);
+    for (const actionName of ['close', 'reopen']) await client.send('post', `/requirements/${requirement.id}/actions`, { revision: 1, action: actionName }).expect(403);
+    await requirementUpload(client, requirement.id, Buffer.from('forbidden'), 'forbidden.txt', 403);
+  }
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  await employee.send('post', `/requirements/${requirement.id}/demos`, { assetId: demo.id, revision: 0 }).expect(403);
+  await employee.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: 0 }).expect(403);
+  const candidates = (await employee.get(`/requirements/${requirement.id}/demo-candidates`).expect(200)).body;
+  assert.ok(candidates.items.every(item => !item.canBind));
+  await other.get(`/requirements/${requirement.id}/demo-candidates`).expect(403);
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, assignedUserIds: [], revision: 1 }).expect(200);
+  await employee.get(`/requirements/${requirement.id}`).expect(403);
+  await employee.get(`/requirements/${requirement.id}/documents/${document.body.id}/download`).expect(403);
+  assert.ok(!(await employee.get('/requirements').expect(200)).body.items.some(item => item.id === requirement.id));
+});
+
+test('requirements without assignees stay private to publishers and invalid assignments roll back', async t => {
+  const ctx = await fixture(t), business = await ctx.login('preview-business'), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const requirement = (await business.send('post', '/requirements', requirementContent).expect(201)).body;
+  assert.deepEqual(requirement.assignedUsers, []);
+  await pm.get(`/requirements/${requirement.id}`).expect(200);
+  await employee.get(`/requirements/${requirement.id}`).expect(403);
+  await business.send('put', `/requirements/${requirement.id}`, { ...requirementContent, assignedUserIds: ['missing-user'], revision: 0 }).expect(400);
+  assert.equal(ctx.store.one('SELECT revision FROM requirements WHERE id=?', requirement.id).revision, 0);
+  await business.send('put', `/requirements/${requirement.id}`, { ...requirementContent, assignedUserIds: ['preview-employee', 'preview-employee'], revision: 0 }).expect(200);
+  assert.equal((await employee.get(`/requirements/${requirement.id}`).expect(200)).body.assignedUsers.length, 1);
+  await requirementUpload(business, requirement.id, Buffer.alloc(0), 'empty.txt', 400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_files WHERE requirement_id=?', requirement.id).count, 0);
+  assert.deepEqual(fs.readdirSync(path.join(ctx.store.root, 'tmp')), []);
+});
+
+test('multiple requirement documents are retained and independently downloadable after additional uploads', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const requirement = await publishRequirement(pm);
+  const first = await requirementUpload(pm, requirement.id, Buffer.from('first document'), '需求一.txt');
+  const second = await requirementUpload(pm, requirement.id, Buffer.from('second document'), '需求二.txt');
+  const current = (await employee.get(`/requirements/${requirement.id}`).expect(200)).body;
+  assert.equal(current.documents.length, 2);
+  assert.deepEqual(new Set(current.documents.map(file => file.name)), new Set(['需求一.txt', '需求二.txt']));
+  assert.equal(second.body.revision, first.body.revision + 1);
+  for (const [document, contents] of [[first.body, 'first document'], [second.body, 'second document']]) {
+    const response = await employee.get(`/requirements/${requirement.id}/documents/${document.id}/download`).expect(200);
+    assert.equal(response.text || response.body.toString(), contents);
+  }
+});
+
+test('Demo requirement bindings support many-to-many and stay within Demo visibility', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), other = await ctx.login('preview-other'), admin = await ctx.login('preview-admin');
+  const first = await publishRequirement(pm, { assignedUserIds: ['preview-employee', 'preview-admin', 'preview-other'] }), second = await publishRequirement(pm, { title: '第二个演示需求' });
+  const own = (await employee.send('post', '/assets', { description, requirementIds: [first.id, second.id, first.id] }).expect(201)).body;
+  const hidden = (await other.send('post', '/assets', { description, requirementIds: [first.id] }).expect(201)).body;
+  const detailData = await detail(employee, own.id);
+  assert.equal(detailData.requirements.length, 2);
+  assert.deepEqual(new Set(detailData.latest.requirements.map(item => item.id)), new Set([first.id, second.id]));
+  const employeeView = (await employee.get(`/requirements/${first.id}`).expect(200)).body;
+  assert.deepEqual(employeeView.demos.map(asset => asset.id), [own.id]);
+  const pmView = (await pm.get(`/requirements/${first.id}`).expect(200)).body;
+  assert.equal(pmView.demos.length, 2);
+  const adminView = (await admin.get(`/requirements/${first.id}`).expect(200)).body;
+  assert.equal(adminView.demos.length, 0);
+  const candidates = (await employee.get(`/requirements/${second.id}/demo-candidates`).expect(200)).body;
+  assert.ok(candidates.items.every(asset => asset.owner.id === 'preview-employee'));
+  assert.ok(!JSON.stringify(candidates).includes(hidden.id));
+  const filtered = (await employee.get(`/catalog?requirement=${first.id}`).expect(200)).body;
+  assert.deepEqual(filtered.items.map(asset => asset.id), [own.id]);
+  const list = (await employee.get('/requirements?q=' + encodeURIComponent(first.title)).expect(200)).body;
+  assert.equal(list.items.find(item => item.id === first.id).demoCount, 1);
+  await employee.send('post', `/requirements/${second.id}/demos`, { assetId: hidden.id, revision: 0 }).expect(404);
+});
+
+test('business publishers bind visible Demos without gaining permission to edit Demo content', async t => {
+  const ctx = await fixture(t), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee');
+  const requirement = await publishRequirement(business), demo = (await employee.send('post', '/assets', { description }).expect(201)).body;
+  await business.send('post', `/requirements/${requirement.id}/demos`, { assetId: demo.id, revision: 0 }).expect(200);
+  let current = await detail(employee, demo.id);
+  assert.deepEqual(current.requirements.map(item => item.id), [requirement.id]); assert.equal(current.revision, 1);
+  await business.send('put', `/versions/${demo.versionId}`, { revision: 0, description }).expect(403);
+  await business.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: 1 }).expect(200);
+  current = await detail(employee, demo.id); assert.equal(current.requirements.length, 0);
+  const anotherPublisher = await ctx.login('preview-pm'), foreignRequirement = await publishRequirement(anotherPublisher);
+  await business.send('post', `/requirements/${foreignRequirement.id}/demos`, { assetId: demo.id, revision: current.revision }).expect(403);
+});
+
+test('drafts may be unbound but submission and publication require a requirement', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm');
+  const requirement = await publishRequirement(pm);
+  for (const [client, transition] of [[employee, 'submit'], [manager, 'publish']]) {
+    const demo = (await client.send('post', '/assets', { description }).expect(201)).body;
+    await client.upload(demo.versionId, 0, 'sample.csv', Buffer.from('id,value\n1,2')).expect(201);
+    const denied = await action(client, demo.versionId, 1, transition); assert.equal(denied.status, 400); assert.match(denied.body.error, /绑定至少一个需求/);
+    const before = await detail(client, demo.id);
+    await client.send('put', `/versions/${demo.versionId}`, { revision: 1, assetRevision: before.revision, description, requirementIds: [requirement.id] }).expect(200);
+    assert.equal((await action(client, demo.versionId, 2, transition)).status, 200);
+    const after = await detail(client, demo.id);
+    assert.deepEqual(after.requirements.map(item => item.id), [requirement.id]);
+    const blocked = await pm.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: after.revision }).expect(409);
+    assert.match(blocked.body.error, /保留至少一个/);
+    if (transition === 'submit') {
+      assert.equal(after.submissions[0].snapshot.requirements[0].id, requirement.id);
+      await manager.send('put', `/versions/${demo.versionId}`, { revision: 3, assetRevision: after.revision, description, requirementIds: [] }).expect(409);
+    }
+  }
+});
+
+test('closed requirements preserve existing links and reject new links until reopened', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const requirement = await publishRequirement(pm);
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 0, action: 'close' }).expect(200);
+  const before = await detail(employee, demo.id);
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 0, assetRevision: before.revision, description, requirementIds: [requirement.id] }).expect(200);
+  await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(409);
+  const next = (await employee.send('post', '/assets', { description }).expect(201)).body;
+  await pm.send('post', `/requirements/${requirement.id}/demos`, { assetId: next.id, revision: 0 }).expect(409);
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 1, action: 'reopen' }).expect(200);
+  await pm.send('post', `/requirements/${requirement.id}/demos`, { assetId: next.id, revision: 0 }).expect(200);
+});
+
+test('binding edits are atomic and reject stale asset revisions or invalid requirements', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const first = await publishRequirement(pm), second = await publishRequirement(pm);
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [first.id] }).expect(201)).body;
+  await pm.send('post', `/requirements/${second.id}/demos`, { assetId: demo.id, revision: 0 }).expect(200);
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 0, assetRevision: 0, description: { ...description, title: '冲突覆盖' }, requirementIds: [first.id] }).expect(409);
+  let current = await detail(employee, demo.id); assert.equal(current.latest.description.title, description.title); assert.equal(current.requirements.length, 2);
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 0, assetRevision: current.revision, description, requirementIds: ['00000000-0000-4000-8000-000000000000'] }).expect(404);
+  current = await detail(employee, demo.id); assert.equal(current.latest.revision, 0); assert.equal(current.requirements.length, 2);
+  const count = ctx.store.one('SELECT COUNT(*) AS count FROM assets').count;
+  await employee.send('post', '/assets', { description, requirementIds: ['invalid'] }).expect(400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM assets').count, count);
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 0, assetRevision: current.revision, description, requirementIds: [] }).expect(200);
+  assert.equal((await detail(employee, demo.id)).requirements.length, 0);
+});
+
+test('requirement bindings persist through backup, restore and Demo version creation', async t => {
+  const ctx = await fixture(t), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm');
+  const requirement = await publishRequirement(pm), demo = (await manager.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  const document = await requirementUpload(pm, requirement.id);
+  await manager.upload(demo.versionId, 0, 'data.csv', Buffer.from('id,value\n1,2')).expect(201);
+  assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
+  const published = await detail(manager, demo.id);
+  await manager.send('post', `/assets/${demo.id}/versions`, { revision: published.revision, baseVersionId: demo.versionId }).expect(201);
+  assert.equal((await detail(manager, demo.id)).versions.every(version => version.requirements[0].id === requirement.id), true);
+  const backupPath = path.join(ctx.root, 'requirement-backup'), restorePath = path.join(ctx.root, 'requirement-restore');
+  await createBackup(ctx.store.root, backupPath); await restoreBackup(backupPath, restorePath);
+  const restored = createApp({ dataDir: restorePath, demoMode: true, origin });
+  try {
+    assert.equal(restored.store.one('SELECT title FROM requirements WHERE id=?', requirement.id).title, requirement.title);
+    assert.equal(restored.store.one('SELECT requirement_id FROM asset_requirements WHERE asset_id=?', demo.id).requirement_id, requirement.id);
+    assert.equal(restored.store.one('SELECT user_id FROM requirement_assignees WHERE requirement_id=?', requirement.id).user_id, 'preview-employee');
+    assert.equal(restored.store.one('SELECT file_id FROM requirement_files WHERE requirement_id=?', requirement.id).file_id, document.body.id);
+    assert.equal(fs.readFileSync(path.join(restorePath, 'files', document.body.id), 'utf8'), 'requirement document');
+    assert.equal(restored.store.one('PRAGMA foreign_key_check'), undefined);
+  } finally { restored.store.db.close(); }
+});
+
+test('publication notifies all PMs and only linked business publishers, deduplicating roles and CCs', async t => {
+  const ctx = await fixture(t), manager = await ctx.login('preview-manager'), business = await ctx.login('preview-business');
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['business', 'pm']), 'preview-other-manager');
+  ctx.store.run('UPDATE users SET roles=? WHERE id IN (?,?)', JSON.stringify(['business']), 'preview-other', 'preview-colleague');
+  ctx.store.run('UPDATE users SET roles=?,enabled=0 WHERE id=?', JSON.stringify(['pm']), 'preview-admin');
+  const secondBusiness = await ctx.login('preview-other-manager'), unrelatedBusiness = await ctx.login('preview-other'), disabledBusiness = await ctx.login('preview-colleague');
+  const first = await publishRequirement(business, { title: '商务需求一' }), second = await publishRequirement(business, { title: '商务需求二' });
+  const third = await publishRequirement(secondBusiness, { title: '另一位商务的需求' }), fourth = await publishRequirement(disabledBusiness, { title: '已停用商务的需求' });
+  await publishRequirement(unrelatedBusiness, { title: '未关联的商务需求' });
+  const demo = (await manager.send('post', '/assets', { description, requirementIds: [first.id, second.id, third.id, fourth.id] }).expect(201)).body;
+  await manager.upload(demo.versionId, 0).expect(201);
+  await business.send('post', `/requirements/${first.id}/actions`, { revision: 0, action: 'close' }).expect(200);
+  ctx.store.run('UPDATE users SET enabled=0 WHERE id=?', 'preview-colleague');
+  await manager.send('post', `/versions/${demo.versionId}/actions`, { revision: 1, action: 'publish', ccUserIds: ['preview-employee', 'missing-user'] }).expect(400);
+  assert.equal(ctx.store.one('SELECT status FROM versions WHERE id=?', demo.versionId).status, 'draft');
+  assert.equal(ctx.notifications.list().filter(job => job.version_id === demo.versionId).length, 0);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM version_cc WHERE version_id=?', demo.versionId).count, 0);
+  await manager.send('post', `/versions/${demo.versionId}/actions`, { revision: 1, action: 'publish', ccUserIds: ['preview-business', 'preview-other-manager', 'preview-employee', 'preview-employee'] }).expect(200);
+  const jobs = ctx.notifications.list().filter(job => job.version_id === demo.versionId && job.kind === 'publish');
+  assert.deepEqual(new Set(jobs.map(job => job.recipient_id)), new Set(['preview-manager', 'preview-pm', 'preview-business', 'preview-other-manager', 'preview-employee']));
+  assert.equal(jobs.length, 5);
+  for (const job of jobs) assert.deepEqual(new Set(JSON.parse(job.detail).requirements.map(requirement => requirement.id)), new Set([first.id, second.id, third.id, fourth.id]));
+  await manager.send('post', `/versions/${demo.versionId}/actions`, { revision: 2, action: 'publish' }).expect(409);
+  assert.equal(ctx.notifications.list().filter(job => job.version_id === demo.versionId).length, jobs.length);
+});
+
+test('Feishu sends requirement snapshots to business publishers and retries publication and restore notifications safely', async t => {
+  const ctx = await fixture(t), manager = await ctx.login('preview-manager'), business = await ctx.login('preview-business');
+  const requirement = await publishRequirement(business, { title: '商务演示验收需求' });
+  const demo = (await manager.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  await manager.upload(demo.versionId, 0).expect(201);
+  await action(manager, demo.versionId, 1, 'publish').then(result => assert.equal(result.status, 200));
+  await business.send('put', `/requirements/${requirement.id}`, { ...requirementContent, title: '发布后的新需求标题', revision: 0 }).expect(200);
+  const { createNotifications } = await import('../server/notifications.mjs');
+  ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
+  const calls = [];
+  let failBusiness = true;
+  const sender = createNotifications(ctx.store, { demoMode: false, appId: 'test', appSecret: 'test', notificationFetch: async (url, options) => {
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    const message = JSON.parse(options.body); calls.push(message);
+    const failed = failBusiness && message.receive_id === 'ou_mock_preview-business';
+    return { ok: !failed, json: async () => ({ code: failed ? 230013 : 0 }) };
+  } });
+  await sender.drain();
+  const pending = sender.list().find(job => job.kind === 'publish' && job.recipient_id === 'preview-business');
+  assert.equal(pending.status, 'pending'); assert.equal(pending.attempts, 1);
+  failBusiness = false; ctx.store.run('UPDATE notifications SET next_at=0');
+  await sender.drain();
+  const businessCalls = calls.filter(message => message.receive_id === 'ou_mock_preview-business');
+  assert.equal(businessCalls.length, 2); assert.equal(businessCalls[0].uuid, businessCalls[1].uuid);
+  assert.equal(sender.list().find(job => job.id === pending.id).status, 'sent');
+  assert.ok(sender.list().filter(job => job.kind === 'publish').every(job => job.status === 'sent'));
+  assert.deepEqual(new Set(calls.map(message => message.receive_id)), new Set(['ou_mock_preview-manager', 'ou_mock_preview-pm', 'ou_mock_preview-business']));
+  const text = JSON.parse(businessCalls[1].content).text;
+  assert.ok(text.includes('商务演示验收需求')); assert.ok(!text.includes('发布后的新需求标题'));
+  assert.ok(text.includes(description.title)); assert.ok(text.includes('版本：V1')); assert.ok(text.includes(`demo=${demo.id}`));
+  assert.ok(!text.includes(description.costEstimate)); assert.ok(!text.includes(description.content));
+  await sender.drain(); assert.equal(calls.length, 4);
+  await action(manager, demo.versionId, 2, 'unpublish', '更新文件').then(result => assert.equal(result.status, 200));
+  await action(manager, demo.versionId, 3, 'restore', '更新完成').then(result => assert.equal(result.status, 200));
+  const restored = sender.list().filter(job => job.kind === 'restore');
+  assert.deepEqual(new Set(restored.map(job => job.recipient_id)), new Set(['preview-manager', 'preview-pm', 'preview-business']));
+  calls.length = 0;
+  await sender.drain();
+  assert.equal(calls.length, 3);
+  const restoredText = JSON.parse(calls.find(message => message.receive_id === 'ou_mock_preview-business').content).text;
+  assert.ok(restoredText.includes('Demo 已恢复发布')); assert.ok(restoredText.includes('发布后的新需求标题'));
+  assert.ok(sender.list().filter(job => job.kind === 'restore').every(job => job.status === 'sent'));
+});
+
+test('queued business notifications are skipped when accounts, roles or requirement bindings change', async t => {
+  const ctx = await fixture(t), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  ctx.store.run('UPDATE users SET roles=? WHERE id IN (?,?)', JSON.stringify(['business']), 'preview-other-manager', 'preview-colleague');
+  const secondBusiness = await ctx.login('preview-other-manager'), thirdBusiness = await ctx.login('preview-colleague');
+  const first = await publishRequirement(business), second = await publishRequirement(secondBusiness), third = await publishRequirement(thirdBusiness), pmRequirement = await publishRequirement(pm);
+  const demo = (await manager.send('post', '/assets', { description, requirementIds: [first.id, second.id, third.id, pmRequirement.id] }).expect(201)).body;
+  await manager.upload(demo.versionId, 0).expect(201);
+  await action(manager, demo.versionId, 1, 'publish').then(result => assert.equal(result.status, 200));
+  ctx.store.run('UPDATE users SET enabled=0 WHERE id=?', 'preview-business');
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['employee']), 'preview-other-manager');
+  const asset = await detail(pm, demo.id);
+  await thirdBusiness.send('delete', `/requirements/${third.id}/demos/${demo.id}`, { revision: asset.revision }).expect(200);
+  const { createNotifications } = await import('../server/notifications.mjs');
+  ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
+  const calls = [];
+  const sender = createNotifications(ctx.store, { demoMode: false, appId: 'test', appSecret: 'test', notificationFetch: async (url, options) => {
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    calls.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ code: 0 }) };
+  } });
+  await sender.drain();
+  for (const recipient of ['preview-business', 'preview-other-manager', 'preview-colleague']) {
+    const job = sender.list().find(item => item.version_id === demo.versionId && item.recipient_id === recipient);
+    assert.equal(job.status, 'skipped'); assert.equal(job.attempts, 0);
+  }
+  assert.deepEqual(new Set(calls.map(message => message.receive_id)), new Set(['ou_mock_preview-manager', 'ou_mock_preview-pm']));
 });

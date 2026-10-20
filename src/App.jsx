@@ -4,11 +4,14 @@ import { api, setCsrf, streamApi } from './api';
 import { Avatar, Badge, Empty, Loading, ErrorBox, Toast, bytes, date, roleLabels } from './components';
 import { Editor, Detail } from './Demo';
 import { UsersPage, SettingsPage } from './Admin';
+import { RequirementsPage } from './Requirements';
+import { routeToIntranet } from './network-routing.mjs';
 
 export default function App() {
   const [auth, setAuth] = useState(null), [error, setError] = useState(''), [assets, setAssets] = useState([]), [config, setConfig] = useState(null), [loading, setLoading] = useState(true);
-  const [page, setPage] = useState('library'), [status, setStatus] = useState('all'), [query, setQuery] = useState(''), [category, setCategory] = useState('all'), [owner, setOwner] = useState('all'), [layout, setLayout] = useState(() => window.matchMedia('(max-width: 700px)').matches ? 'grid' : 'list');
-  const [detailId, setDetailId] = useState(new URLSearchParams(location.search).get('demo')), [editor, setEditor] = useState(null), [toast, setToast] = useState(''), [menu, setMenu] = useState(false), [reload, setReload] = useState(0);
+  const [page, setPage] = useState(() => { const params = new URLSearchParams(location.search); return params.has('requirement') || ['requirements', 'my-requirements'].includes(params.get('view')) ? params.get('view') === 'my-requirements' ? 'my-requirements' : 'requirements' : 'library'; }), [status, setStatus] = useState('all'), [query, setQuery] = useState(''), [category, setCategory] = useState('all'), [owner, setOwner] = useState('all'), [layout, setLayout] = useState(() => window.matchMedia('(max-width: 700px)').matches ? 'grid' : 'list');
+  const [requirementId, setRequirementId] = useState(new URLSearchParams(location.search).get('requirement'));
+  const [detailId, setDetailId] = useState(new URLSearchParams(location.search).get('demo')), [editor, setEditor] = useState(() => { const params = new URLSearchParams(location.search); return params.get('view') === 'upload' ? { requirementIds: params.get('requirement') ? [params.get('requirement')] : [] } : null; }), [toast, setToast] = useState(''), [menu, setMenu] = useState(false), [reload, setReload] = useState(0);
   const [catalog, setCatalog] = useState({ stats: {}, owners: [], categories: [], total: 0, page: 1, pages: 1, pendingReviews: 0 });
   const [pageNumber, setPageNumber] = useState(1), [pageSize, setPageSize] = useState(10), [days, setDays] = useState('0'), [sort, setSort] = useState('updated');
   const [ragQuestion, setRagQuestion] = useState(''), [ragResult, setRagResult] = useState(null), [ragBusy, setRagBusy] = useState(false), [ragError, setRagError] = useState('');
@@ -18,14 +21,15 @@ export default function App() {
   useEffect(() => { const id = auth?.user?.id || null; if (previousUser.current && previousUser.current !== id) { setEditor(null); setDetailId(null); setConfig(null); setAssets([]); setPage('library'); } previousUser.current = id; }, [auth?.user?.id]);
   const user = auth?.user, has = role => user?.roles.includes(role);
   const notify = message => { setToast(message); window.setTimeout(() => setToast(''), 4000); };
-  function showDetail(id, replace = false) { history[replace ? 'replaceState' : 'pushState']({}, '', `/?demo=${encodeURIComponent(id)}`); setEditor(null); setDetailId(id); }
-  function showUpload() { history.pushState({}, '', '/?view=upload'); setDetailId(null); setEditor({}); }
-  function closeWorkspacePage() { history.pushState({}, '', '/'); setDetailId(null); setEditor(null); }
-  useEffect(() => { const sync = () => { const params = new URLSearchParams(location.search); const id = params.get('demo'); setDetailId(id); if (!id && params.get('view') === 'upload') setEditor({}); else setEditor(null); }; addEventListener('popstate', sync); return () => removeEventListener('popstate', sync); }, []);
+  function showDetail(id, replace = false) { history[replace ? 'replaceState' : 'pushState']({}, '', `/?demo=${encodeURIComponent(id)}` + (['requirements', 'my-requirements'].includes(page) ? `&view=${page}` + (requirementId ? `&requirement=${encodeURIComponent(requirementId)}` : '') : '')); setEditor(null); setDetailId(id); }
+  function showUpload(requirement = null) { history.pushState({}, '', '/?view=upload' + (requirement?.id ? `&requirement=${encodeURIComponent(requirement.id)}` : '')); setDetailId(null); setEditor(requirement?.id ? { requirementIds: [requirement.id], requirements: [requirement] } : {}); }
+  function closeWorkspacePage() { history.pushState({}, '', ['requirements', 'my-requirements'].includes(page) ? requirementId ? `/?requirement=${encodeURIComponent(requirementId)}&view=${page}` : `/?view=${page}` : '/'); setDetailId(null); setEditor(null); }
+  function showRequirement(id) { history.pushState({}, '', id ? `/?requirement=${encodeURIComponent(id)}&view=${page === 'my-requirements' ? 'my-requirements' : 'requirements'}` : `/?view=${page === 'my-requirements' ? 'my-requirements' : 'requirements'}`); setRequirementId(id); setPage(page === 'my-requirements' ? 'my-requirements' : 'requirements'); setDetailId(null); setEditor(null); }
+  useEffect(() => { const sync = () => { const params = new URLSearchParams(location.search); const id = params.get('demo'), requirement = params.get('requirement'), view = params.get('view'); setDetailId(id); setRequirementId(requirement); if (requirement || ['requirements', 'my-requirements'].includes(view)) setPage(view === 'my-requirements' ? 'my-requirements' : 'requirements'); else if (!id && !view) setPage('library'); if (!id && view === 'upload') setEditor(requirement ? { requirementIds: [requirement] } : {}); else setEditor(null); }; addEventListener('popstate', sync); return () => removeEventListener('popstate', sync); }, []);
   async function loadAuth() { try { const result = await api('/auth/me'); setCsrf(result.csrf); setAuth(result); setError(''); } catch (e) { setError(e.message); } }
   function refresh() { setReload(n => n + 1); }
   useEffect(() => {
-    loadAuth();
+    routeToIntranet(window.location).then(redirected => { if (!redirected) loadAuth(); });
     const renew = () => loadAuth();
     const timer = window.setInterval(renew, 60000);
     window.addEventListener('focus', renew); window.addEventListener('prt-session-expired', renew);
@@ -38,26 +42,29 @@ export default function App() {
   }, [detailId]);
   const identity = user ? [user.id, user.revision, user.enabled, user.roles.join(',')].join(':') : '';
   useEffect(() => {
-    if (user?.enabled && user.roles.includes('business') && !user.roles.some(r => ['employee', 'supervisor', 'pm', 'admin'].includes(r))) setPage('search');
-    else if (user?.enabled && user.roles.length === 1 && has('admin')) setPage('users');
+    if (!new URLSearchParams(location.search).has('requirement') && !['requirements', 'my-requirements'].includes(new URLSearchParams(location.search).get('view'))) {
+      if (user?.enabled && user.roles.includes('business') && !user.roles.some(r => ['employee', 'supervisor', 'pm', 'admin'].includes(r))) setPage('search');
+      else if (user?.enabled && user.roles.length === 1 && has('admin')) setPage('users');
+    }
     if (!user?.enabled || !user?.roles.length) { setAssets([]); setLoading(false); }
   }, [identity]);
+  useEffect(() => { if (!user?.enabled || !user.roles.length) return; const controller = new AbortController(); api('/config', { signal: controller.signal }).then(setConfig).catch(error => { if (!controller.signal.aborted) setError(error.message); }); return () => controller.abort(); }, [identity, reload]);
   useEffect(() => { setPageNumber(1); }, [page, status, query, category, owner, pageSize, days, sort]);
   useEffect(() => {
-    if (!user?.enabled || !user.roles.length || ['users', 'settings', 'search'].includes(page)) return;
+    if (!user?.enabled || !user.roles.length || ['users', 'settings', 'search', 'requirements', 'my-requirements'].includes(page)) return;
     const controller = new AbortController(); setLoading(true);
     const timer = setTimeout(async () => {
       try {
         const params = new URLSearchParams({ scope: page, status, q: query, category, owner, page: String(pageNumber), pageSize: String(pageSize), days, sort });
-        const [data, settings] = await Promise.all([api('/catalog?' + params, { signal: controller.signal }), api('/config', { signal: controller.signal })]);
-        setAssets(data.items); setCatalog(data); setConfig(settings); setError('');
+        const data = await api('/catalog?' + params, { signal: controller.signal });
+        setAssets(data.items); setCatalog(data); setError('');
       } catch (e) { if (e.name !== 'AbortError') { setAssets([]); setError(e.message); } }
       finally { if (!controller.signal.aborted) setLoading(false); }
     }, query ? 250 : 0);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [identity, page, status, query, category, owner, pageNumber, pageSize, days, sort, reload]);
   async function logout() { try { await api('/auth/logout', { method: 'POST' }); setAssets([]); setDetailId(null); setEditor(null); setPage('library'); setStatus('all'); setQuery(''); setCategory('all'); setOwner('all'); await loadAuth(); } catch (e) { setError(e.message); } }
-  function navigate(next) { if (detailId) { history.pushState({}, '', '/'); setDetailId(null); } setPage(next); setStatus('all'); setQuery(''); setCategory('all'); setOwner('all'); setDays('0'); setSort('updated'); setPageNumber(1); setMenu(false); }
+  function navigate(next) { history.pushState({}, '', ['requirements', 'my-requirements'].includes(next) ? `/?view=${next}` : '/'); setDetailId(null); setEditor(null); setRequirementId(null); setPage(next); setStatus('all'); setQuery(''); setCategory('all'); setOwner('all'); setDays('0'); setSort('updated'); setPageNumber(1); setMenu(false); }
   function showStatus(next) { setStatus(next); setQuery(''); setCategory('all'); setOwner('all'); setDays('0'); setPageNumber(1); requestAnimationFrame(() => listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   async function searchRag(e) { e.preventDefault(); if (ragQuestion.trim().length < 2) return; setRagBusy(true); setRagError(''); setRagResult(null); setRagStages([]); try { await streamApi('/search/rag/stream', { question: ragQuestion.trim() }, event => { if (event.type === 'stage') setRagStages(items => [...items, event]); else if (event.type === 'result') setRagResult(event); else if (event.type === 'error') setRagError(event.error); }); } catch (err) { setRagError(err.message); } finally { setRagBusy(false); } }
   if (!auth) return <div className="boot"><Layers3 size={34}/>{error ? <><ErrorBox>{error}</ErrorBox><button className="button" onClick={loadAuth}>重试</button></> : <Loading/>}</div>;
@@ -66,7 +73,7 @@ export default function App() {
   const scoped = assets, filtered = assets, counts = catalog.stats;
   const pending = catalog.pendingReviews;
   const stats = [{ title: 'Demo 总数', filter: 'all', value: counts.total || 0, note: `${counts.versions || 0} 个版本持续沉淀`, Icon: Database, color: 'green' }, { title: '已有发布版本', filter: 'published', value: counts.published || 0, note: '新版本审核不影响已发布数据', Icon: CircleCheck, color: 'sage' }, { title: '待审核', filter: 'pending', value: counts.pending || 0, note: '等待主管确认发布', Icon: Clock3, color: 'amber' }, { title: '待完善', filter: 'incomplete', value: (counts.draft || 0) + (counts.returned || 0), note: '草稿与退回待修改', Icon: FilePenLine, color: 'blue' }];
-  const titles = { library: (has('pm') || has('business')) ? '数据资产库' : '数据工作台', search: '智能检索', mine: '我的 Demo', team: '团队 Demo', reviews: '审核工作台', users: '人员与权限', settings: '平台设置' };
+  const titles = { library: (has('pm') || has('business')) ? '数据资产库' : '数据工作台', search: '智能检索', requirements: '需求中心', 'my-requirements': '我的需求', mine: '我的 Demo', team: '团队 Demo', reviews: '审核工作台', users: '人员与权限', settings: '平台设置' };
   return <div className="app-shell">
     {menu && <div className="mobile-scrim" onClick={() => setMenu(false)}/>}
     <aside className={`sidebar ${menu ? 'open' : ''}`}>
@@ -74,6 +81,8 @@ export default function App() {
       <div className="workspace-label"><span className="workspace-dot"/>企业内部工作空间<ShieldCheck size={14}/></div>
       <div className="nav-label">工作空间</div>
       <nav>
+        <Nav active={page === 'requirements'} icon={ClipboardCheck} onClick={() => navigate('requirements')}>需求中心</Nav>
+        <Nav active={page === 'my-requirements'} icon={ClipboardCheck} onClick={() => navigate('my-requirements')}>我的需求</Nav>
         {(has('employee') || has('supervisor') || has('pm') || has('business')) && <Nav active={page === 'library'} icon={LayoutDashboard} onClick={() => navigate('library')}>{(has('pm') || has('business')) ? '数据资产库' : '数据工作台'}</Nav>}
         {(has('employee') || has('supervisor') || has('pm') || has('business')) && <Nav active={page === 'search'} icon={Sparkles} onClick={() => navigate('search')}>智能检索</Nav>}
         {(has('employee') || has('supervisor')) && <Nav active={page === 'mine'} icon={FolderOpen} onClick={() => navigate('mine')}>我的 Demo</Nav>}
@@ -85,7 +94,7 @@ export default function App() {
     <div className="main-shell"><header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-toggle" aria-label="打开菜单" onClick={() => setMenu(true)}><Menu size={20}/></button><span>工作空间</span><ChevronRight size={14}/><strong>{titles[page]}</strong></div><div className="topbar-right"><span className="internal-tag"><span/>仅限企业内部</span>{has('supervisor') && <button className="icon-button notification" aria-label="查看待审核" onClick={() => navigate('reviews')}><Bell size={19}/>{pending > 0 && <i/>}</button>}<Avatar user={user} small/></div></header>
     <main>
       <ErrorBox>{error}</ErrorBox>
-      {page === 'users' ? <UsersPage notify={notify}/> : page === 'settings' ? <SettingsPage notify={notify} onSaved={refresh}/> : page === 'search' ? <RagPage question={ragQuestion} setQuestion={setRagQuestion} result={ragResult} stages={ragStages} busy={ragBusy} error={ragError} onSearch={searchRag} onOpen={showDetail}/> : <>
+      {page === 'users' ? <UsersPage notify={notify}/> : page === 'settings' ? <SettingsPage notify={notify} onSaved={refresh}/> : ['requirements', 'my-requirements'].includes(page) ? <RequirementsPage key={identity} user={user} config={config} selectedId={requirementId} assignedOnly={page === 'my-requirements'} refreshKey={reload} onSelect={showRequirement} onOpenDemo={showDetail} onCreateDemo={showUpload} notify={notify} onChanged={refresh}/> : page === 'search' ? <RagPage question={ragQuestion} setQuestion={setRagQuestion} result={ragResult} stages={ragStages} busy={ragBusy} error={ragError} onSearch={searchRag} onOpen={showDetail}/> : <>
         <section className="page-heading"><div><div className="eyebrow">DATA WORKSPACE <span>/</span> {(has('pm') || has('business')) ? '全局视图' : '我的工作空间'}</div><h1>{titles[page]}<span className="heading-dot">.</span></h1><p>{page === 'reviews' ? '把好发布前的最后一关，让每份数据都准备就绪。' : page === 'mine' ? '管理你的数据样例，从第一次上传到每一次迭代。' : '汇集业务数据样例，让每一次演示都有据可依。'}</p></div>{(has('employee') || has('supervisor')) && <button className="button primary" disabled={!config || loading} onClick={showUpload}><Plus size={18}/>上传 Demo</button>}</section>
         <section className="stats-grid">{stats.map(({ title, filter, value, note, Icon, color }) => <button type="button" className={`stat-card stat-link ${color} ${status === filter ? 'selected' : ''}`} key={title} onClick={() => showStatus(filter)} aria-label={`查看${title}列表`}><div className="stat-top"><span>{title}</span><span className="stat-icon"><Icon size={19}/></span></div><strong>{String(value).padStart(2, '0')}</strong><small>{note}</small><span className="stat-go">查看列表 <ArrowRight size={13}/></span></button>)}</section>
         {page === 'reviews' && <div className="review-banner"><ClipboardCheck size={22}/><div><strong>有 {pending} 个版本等待你的审核</strong><p>检查数据说明与文件，可直接修改后发布，也可以退回给员工补充。</p></div></div>}
@@ -97,7 +106,7 @@ export default function App() {
         </section><footer className="page-footer"><span>PRT DataHub · 让每一份数据发挥价值</span><span>内部数据 · 有序协作 · 版本可追溯</span></footer>
       </>}
     </main></div>
-    {detailId && <Detail id={detailId} user={user} onClose={closeWorkspacePage} onEdit={(asset, version) => { history.pushState({}, '', `/?demo=${encodeURIComponent(asset.id)}&edit=${encodeURIComponent(version.id)}`); setDetailId(null); setEditor({ asset, version }); }} onChanged={() => { refresh(); }} notify={notify}/>}
+    {detailId && <Detail id={detailId} user={user} onClose={closeWorkspacePage} onOpenRequirement={showRequirement} onEdit={(asset, version) => { history.pushState({}, '', `/?demo=${encodeURIComponent(asset.id)}&edit=${encodeURIComponent(version.id)}`); setDetailId(null); setEditor({ asset, version }); }} onChanged={() => { refresh(); }} notify={notify}/>}
     {editor && <Editor {...editor} user={user} config={config} onClose={() => editor.asset ? showDetail(editor.asset.id, true) : closeWorkspacePage()} onSaved={id => { showDetail(id, true); refresh(); notify('Demo 已保存'); }}/>}<Toast message={toast}/>
   </div>;
 }

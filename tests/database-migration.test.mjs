@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { openStore } from '../server/db.mjs';
+import { seedPreview } from '../server/seed.mjs';
+
+test('old requirement schema migrates all relations and supports four statuses without foreign key damage', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-status-migration-'));
+  let store = openStore(root); seedPreview(store);
+  const before = store.all('SELECT * FROM requirements'), bindings = store.all('SELECT * FROM asset_requirements'), assignees = store.all('SELECT * FROM requirement_assignees');
+  const file = store.one('SELECT id,uploader_id,created_at FROM files LIMIT 1');
+  store.run('INSERT INTO requirement_files VALUES(?,?,?,?)', before[0].id, file.id, file.uploader_id, file.created_at);
+  store.db.close();
+  const legacy = new DatabaseSync(path.join(root, 'platform.sqlite'));
+  legacy.exec(`PRAGMA foreign_keys=OFF; BEGIN;
+    CREATE TABLE requirements_legacy (id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,category TEXT NOT NULL DEFAULT '',status TEXT NOT NULL CHECK(status IN ('open','closed')),publisher_id TEXT NOT NULL REFERENCES users(id),revision INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    INSERT INTO requirements_legacy SELECT * FROM requirements; DROP TABLE requirements;
+    ALTER TABLE requirements_legacy RENAME TO requirements; COMMIT;`);
+  legacy.close();
+  store = openStore(root);
+  t.after(() => { store.db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  assert.deepEqual(store.all('SELECT * FROM requirements'), before);
+  assert.deepEqual(store.all('SELECT * FROM asset_requirements'), bindings);
+  assert.deepEqual(store.all('SELECT * FROM requirement_assignees'), assignees);
+  assert.equal(store.one('SELECT COUNT(*) AS count FROM requirement_files').count, 1);
+  for (const status of ['needs_update', 'delivered', 'closed', 'open']) store.run('UPDATE requirements SET status=? WHERE id=?', status, before[0].id);
+  assert.deepEqual(store.all('PRAGMA foreign_key_check'), []);
+  assert.equal(store.one("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='requirements_updated'").count, 1);
+});

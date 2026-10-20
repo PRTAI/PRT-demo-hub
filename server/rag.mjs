@@ -1,12 +1,27 @@
 import { z } from 'zod';
 import { parse } from './db.mjs';
+import { optionalMaxTokens } from './model-config.mjs';
 
 const inputSchema = z.object({ question: z.string().trim().min(2, '请至少输入两个字').max(500) });
 const toolSchema = z.object({ query: z.string().max(200).default(''), category: z.string().max(80).optional(), status: z.enum(['draft', 'pending', 'returned', 'published']).optional(), limit: z.number().int().min(1).max(12).default(8) });
 function terms(value) { const text=String(value||'').toLowerCase().normalize('NFKC'), words=text.match(/[a-z0-9][a-z0-9_.-]+|[\p{Script=Han}]+/gu)||[], result=new Set(words); for(const word of words) if(/^[\p{Script=Han}]+$/u.test(word)){for(let i=0;i<word.length;i++)result.add(word[i]);for(let i=0;i<word.length-1;i++)result.add(word.slice(i,i+2));} return [...result]; }
 function rank(query,rows,limit){const wanted=terms(query);return rows.map(row=>{const d=parse(row.description),fields=[d.title,d.summary,d.category,...(d.tags||[]),d.content,d.usage,d.costEstimate,d.difficulty,d.notes,d.changes],haystack=fields.join('\n').toLowerCase();let score=0;for(const term of wanted)if(haystack.includes(term))score+=term.length>1?3:.35;if(d.title&&query.includes(d.title))score+=12;return{row,description:d,score};}).filter(item=>!query||item.score>0).sort((a,b)=>b.score-a.score||b.row.updated_at.localeCompare(a.row.updated_at)).slice(0,limit);}
 function source(item,index){return{ref:index+1,id:item.row.id,title:item.description.title||'未命名 Demo',category:item.description.category,summary:item.description.summary,tags:item.description.tags,content:item.description.content,usage:item.description.usage,costEstimate:item.description.costEstimate,difficulty:item.description.difficulty,notes:item.description.notes,owner:item.row.owner_name,status:item.row.status};}
-async function chat(config,messages,tools){const response=await(config.fetch||fetch)(config.llmBaseUrl.replace(/\/$/,'')+'/chat/completions',{method:'POST',signal:AbortSignal.timeout(30000),headers:{Authorization:`Bearer ${config.llmApiKey}`,'Content-Type':'application/json'},body:JSON.stringify({model:config.llmModel,temperature:.1,max_tokens:900,messages,...(tools?{tools,tool_choice:'auto'}:{})})});if(!response.ok)throw new Error(`模型服务暂时不可用（${response.status}）`);const body=await response.json();return body.choices?.[0]?.message;}
+async function chat(config, messages, tools) {
+  const endpoint = config.llmBaseUrl.replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
+  const maxTokens = optionalMaxTokens(config.llmMaxTokens, 'RAG_LLM_MAX_TOKENS'), timeoutMs = Number(config.llmRequestTimeoutMs ?? 90000);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) throw new Error('RAG_LLM_REQUEST_TIMEOUT_MS 必须是 1～600000 之间的整数');
+  const response = await (config.fetch || fetch)(endpoint, {
+    method: 'POST', signal: AbortSignal.timeout(timeoutMs), headers: { Authorization: `Bearer ${config.llmApiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: config.llmModel, ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }), thinking: { type: config.llmEnableThinking ? 'enabled' : 'disabled' }, messages, ...(tools ? { tools, tool_choice: 'auto' } : {}) })
+  });
+  if (!response.ok) { await response.body?.cancel(); throw new Error(`模型服务暂时不可用（${response.status}）`); }
+  const body = await response.json();
+  if (body.choices?.[0]?.finish_reason === 'length') throw new Error(`智能检索模型输出达到额度上限（${maxTokens === undefined ? '模型服务默认值，应用未设置 max_tokens' : `max_tokens=${maxTokens}`}），已切换本地检索`);
+  const message = body.choices?.[0]?.message;
+  if (!message?.content?.trim() && !message?.tool_calls?.length) throw new Error('模型未返回有效的检索内容');
+  return message;
+}
 export function createRagSearch(store,config,helpers){
   const loadRows=user=>store.all(`SELECT a.*,u.name AS owner_name,v.id AS version_id,v.number,v.status,v.description FROM assets a JOIN users u ON u.id=a.owner_id JOIN versions v ON v.id=(SELECT vv.id FROM versions vv WHERE vv.asset_id=a.id ORDER BY vv.number DESC LIMIT 1) WHERE v.status<>'offline' ORDER BY a.updated_at DESC`).filter(row=>helpers.visible(user,row)).map(row=>({...row,description:JSON.stringify(helpers.descriptionFor(user,row,parse(row.description)))}));
   return async(user,body,emit=()=>{})=>{

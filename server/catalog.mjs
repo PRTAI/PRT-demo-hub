@@ -6,6 +6,7 @@ const querySchema = z.object({
   scope: z.enum(['library', 'mine', 'team', 'reviews']).default('library'),
   q: z.string().max(200).default(''), status: z.enum(['all', 'published', 'pending', 'incomplete', 'draft', 'returned', 'offline']).default('all'),
   category: z.string().max(80).default('all'), owner: z.string().max(100).default('all'),
+  requirement: z.union([z.literal('all'), z.uuid()]).default('all'),
   days: z.coerce.number().int().min(0).max(3650).default(0), sort: z.enum(['updated', 'created', 'name']).default('updated'),
 });
 const from = `FROM assets a JOIN users u ON u.id=a.owner_id JOIN versions v ON v.id=(SELECT vv.id FROM versions vv WHERE vv.asset_id=a.id ORDER BY number DESC LIMIT 1)`;
@@ -36,6 +37,7 @@ export function queryCatalog(store, user, input) {
   else if (query.status !== 'all') { conditions.push('v.status=?'); args.push(query.status); }
   if (query.category !== 'all') { conditions.push("json_extract(v.description,'$.category')=?"); args.push(query.category); }
   if (query.owner !== 'all') { conditions.push('a.owner_id=?'); args.push(query.owner); }
+  if (query.requirement !== 'all') { conditions.push('EXISTS(SELECT 1 FROM asset_requirements ar WHERE ar.asset_id=a.id AND ar.requirement_id=?)'); args.push(query.requirement); }
   if (query.days) { conditions.push('a.updated_at>=?'); args.push(new Date(Date.now() - query.days * 86400000).toISOString()); }
   if (query.q.trim()) {
     conditions.push(`(json_extract(v.description,'$.title') LIKE ? ESCAPE '\\' OR json_extract(v.description,'$.summary') LIKE ? ESCAPE '\\' OR json_extract(v.description,'$.tags') LIKE ? ESCAPE '\\' OR u.name LIKE ? ESCAPE '\\')`);

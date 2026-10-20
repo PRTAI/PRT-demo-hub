@@ -2,7 +2,7 @@
 
 ## 1. 当前交付状态
 
-应用已经实现前后端和持久化，当前已在本机 Docker 部署独立体验环境，地址为 `http://127.0.0.1:8080`，容器名 `prt-datahub`。飞书 OAuth 接入代码已实现，并通过模拟响应验证 state、企业校验和账号初始化；尚未提供真实飞书应用凭据，因此没有完成企业账号的真实联调，也尚未部署至内网服务器。
+现有正式部署记录采用 Windows 宿主机 Node.js 服务，入口为 `http://192.168.110.54:8080`，原飞书登录 Docker 容器已停用。更新现有服务请使用[宿主机部署说明](host-deployment.md#版本更新)，日常使用见[操作手册](user-manual.md)。本文其余章节保留本地体验、首次安装及 Docker 部署参考；实际运行配置以部署机为准。
 
 技术栈：Node.js 24、Express 5、Node 内置 SQLite、React 19、Vite。使用单实例服务、本地持久磁盘，适用于本次 100 人以内的首版范围；并发容量仍需按实际文件大小和服务器条件验证。Node 24 当前可能显示 SQLite 实验特性提示，开发和部署统一使用项目要求的 Node 主版本。
 
@@ -45,6 +45,14 @@ npm run dev
 | `FEISHU_TENANT_KEY` | 允许访问的唯一企业 tenant_key。身份信息不匹配时拒绝接入。 |
 | `BOOTSTRAP_ADMIN_OPEN_IDS` | 可选。允许初始化首位管理员的飞书 open_id，用逗号分隔；已有管理员后不自动提权。 |
 | `DEMO_MODE=false` | 正式运行必须关闭。 |
+| `DEEPSEEK_API_KEY` | 数据说明和智能检索共用的 DeepSeek 官方 Key。 |
+| `DEEPSEEK_BASE_URL` | 官方接口 `https://api.deepseek.com`。 |
+| `DEEPSEEK_MODEL` | 统一使用官方高级模型 `deepseek-v4-pro`。 |
+| `DEEPSEEK_ENABLE_THINKING=false` | 显式关闭思考，减少等待和输出截断。 |
+| `DESCRIPTION_AGENT_MAX_TOKENS` | 可选，默认留空且不发送 `max_tokens`；按需设置说明生成的单次输出上限。 |
+| `RAG_LLM_MAX_TOKENS` | 可选，默认留空且不发送 `max_tokens`；按需设置检索每轮的输出上限。 |
+
+模型迁移、输出预算和双功能自检见 [DeepSeek 官方 Pro 配置](deepseek-configuration.md)。旧阿里云变量及 `DESCRIPTION_AGENT_*` 的独立连接配置不再读取。
 
 构建并运行：
 

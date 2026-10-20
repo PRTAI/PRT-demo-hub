@@ -1,0 +1,12 @@
+services:
+  app:
+    container_name: prt-datahub-production
+    environment:
+      DATA_DIR: /app/data
+volumes:
+  production-data:
+    external: true
+    name: prt-datahub-production_production-data
+  production-backups:
+    external: true
+    name: prt-datahub-production_production-backups

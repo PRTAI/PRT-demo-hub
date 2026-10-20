@@ -24,7 +24,8 @@ let state;
 if (process.argv.includes('--verify')) state = JSON.parse(fs.readFileSync(statePath));
 else {
   const description = { title: '容器验收 · 零售数据样例', summary: 'Docker 上传、审核与持久化验收合成数据', category: '通用数据', tags: ['容器验收'], content: '压缩包包含销售 CSV 和使用说明，所有内容为合成样例。', usage: '下载后解压，用电子表格打开 CSV。', notes: '仅用于功能测试', changes: '', schemaVersion: 1 };
-  const asset = await employee('/assets', 'POST', { description, requestId: randomUUID() }, 201);
+  const requirement = await pm('/requirements', 'POST', { title: '容器验收 · 零售演示需求', content: '使用合成零售数据验证需求绑定、上传、审核与持久化。', category: '通用数据' }, 201);
+  const asset = await employee('/assets', 'POST', { description, requirementIds: [requirement.id], requestId: randomUUID() }, 201);
   const payload = fs.readFileSync('tests/fixtures/retail-demo.zip'), form = new FormData();
   form.append('file', new Blob([payload]), '容器验收样例.zip');
   const file = await employee(`/versions/${asset.versionId}/files`, 'POST', form, 201);

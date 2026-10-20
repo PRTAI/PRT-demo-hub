@@ -11,3 +11,12 @@ backups/
 test-results/
 host-data/
 .host-runtime/
+
+# New documentation (excluded from source branch)
+docs/deepseek-configuration.md
+docs/fresh-windows-deployment.md
+docs/requirements-network-update.md
+docs/requirements.md
+docs/restore-windows-deployment.md
+docs/user-manual.md
+docs/windows-docker-guide.md

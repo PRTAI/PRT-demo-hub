@@ -1,0 +1,10 @@
+services:
+  app:
+    container_name: prt-datahub-windows-test
+    environment:
+      DATA_DIR: /app/data/live
+volumes:
+  production-data:
+    name: prt-datahub-windows-test-data
+  production-backups:
+    name: prt-datahub-windows-test-backups

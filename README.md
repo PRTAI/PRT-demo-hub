@@ -5,6 +5,12 @@
 当前版本：1.1.0。正式飞书环境已部署到 Windows 宿主机，访问 http://192.168.110.54:8080 。原 Docker 容器已停止，原数据卷保留。当前启停、日志和备份操作见 [宿主机部署说明](docs/host-deployment.md)。
 
 - [第一版产品需求文档](docs/requirements-v1.md)：业务范围、角色权限、流程、数据对象、页面及验收标准。
+- [操作手册](docs/user-manual.md)：各角色上手、需求与 Demo 绑定、AI 说明、审核发布、飞书通知、管理维护和部署验收。
+- [Windows Docker 简明部署手册](docs/windows-docker-guide.md)：在 `J:\PRT-demo-hub-test` 编译部署、迁移旧容器数据、验证和维护。
+- [DeepSeek 官方 Pro 配置](docs/deepseek-configuration.md)：数据说明和智能检索统一使用 `deepseek-v4-pro`，包含旧配置迁移及双功能自检。
+- [现有 Windows 服务更新步骤](docs/host-deployment.md#版本更新)：备份、同步代码、构建、重启、检查和回退。
+- [Windows 新目录全新部署](docs/fresh-windows-deployment.md)：针对 `192.168.110.25:8081` 的独立目录、空数据、飞书配置和管理员初始化步骤。
+- [Windows 恢复旧数据并更新部署](docs/restore-windows-deployment.md)：从 `D:\PRT-demo-hub` 校验备份、恢复到新目录，保留原账号和权限并上线新版本。
 - [运行与部署说明](docs/deployment.md)：本地体验、飞书配置、正式运行、管理员初始化、备份恢复及已知边界。
 
 ## Docker 启动（推荐）
@@ -40,7 +46,9 @@ npm run dev
 ## 已实现
 
 - 飞书 OAuth 登录、待授权、角色配置与主管关系管理。
+- [需求中心与 Demo 绑定](docs/requirements.md)：产品经理和商务发布需求，Demo 支持多需求绑定，提交或发布前必须关联需求；发布后自动飞书通知全部产品经理及关联需求的商务发布人。
 - 文件上传与下载、结构化数据说明、草稿与完整版本历史。
+- 需求文档支持多选、分次累加和移除待上传文件；数据说明生成与智能检索共用 DeepSeek 官方 Pro 模型。
 - 员工提交、撤回、退回重提、主管修改审核与直接发布。
 - 下架和恢复、默认版本选择、版本差异、提交快照与操作记录。
 - 员工自有数据、主管团队数据、产品经理全量只读的后端权限控制。

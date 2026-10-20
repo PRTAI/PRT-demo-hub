@@ -15,6 +15,9 @@ import { queryCatalog } from './catalog.mjs';
 import { validateOrigin } from './runtime.mjs';
 import { createRagSearch } from './rag.mjs';
 import { createDescriptionAgent } from './description-agent.mjs';
+import { readModelConfig } from './model-config.mjs';
+import { createRequirements } from './requirements.mjs';
+import { setupNetwork } from './network.mjs';
 import { createBackup } from '../scripts/backup.mjs';
 
 const roles = ['employee', 'supervisor', 'pm', 'business', 'admin'];
@@ -25,7 +28,7 @@ export class HttpError extends Error { constructor(status, message) { super(mess
 const fail = (status, message) => { throw new HttpError(status, message); };
 
 export function createApp(options = {}) {
-  const config = { production: process.env.NODE_ENV === 'production', demoMode: process.env.DEMO_MODE === 'true', origin: process.env.APP_ORIGIN || 'http://127.0.0.1:3100', dataDir: process.env.DATA_DIR || './data', appId: process.env.FEISHU_APP_ID, appSecret: process.env.FEISHU_APP_SECRET, tenantKey: process.env.FEISHU_TENANT_KEY, bootstrapIds: (process.env.BOOTSTRAP_ADMIN_OPEN_IDS || '').split(',').filter(Boolean), llmApiKey: process.env.DASHSCOPE_API_KEY || '', llmModel: process.env.RAG_LLM_MODEL || 'qwen-plus', llmBaseUrl: process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1', descriptionAgentKey: process.env.DESCRIPTION_AGENT_API_KEY || '', descriptionAgentUrl: process.env.DESCRIPTION_AGENT_BASE_URL || '', descriptionAgentModel: process.env.DESCRIPTION_AGENT_MODEL || '', descriptionAgentCommand: process.env.DESCRIPTION_AGENT_COMMAND || 'claude', ...options };
+  const config = { production: process.env.NODE_ENV === 'production', demoMode: process.env.DEMO_MODE === 'true', origin: process.env.APP_ORIGIN || 'http://127.0.0.1:3100', publicOrigin: process.env.PUBLIC_APP_ORIGIN || '', intranetOrigin: process.env.INTRANET_APP_ORIGIN || '', dataDir: process.env.DATA_DIR || './data', appId: process.env.FEISHU_APP_ID, appSecret: process.env.FEISHU_APP_SECRET, tenantKey: process.env.FEISHU_TENANT_KEY, bootstrapIds: (process.env.BOOTSTRAP_ADMIN_OPEN_IDS || '').split(',').filter(Boolean), ...readModelConfig(), ...options };
   if (config.production && config.demoMode) throw new Error('Production refuses DEMO_MODE');
   if (config.production && !config.origin.startsWith('https://')) throw new Error('Production APP_ORIGIN must use HTTPS');
   validateOrigin(config.origin);
@@ -36,9 +39,10 @@ export function createApp(options = {}) {
   if (config.demoMode) seedPreview(store);
   const notifications = createNotifications(store, config);
   const app = express(); app.disable('x-powered-by');
-  app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https:'], connectSrc: ["'self'"], frameAncestors: ["'none'"], upgradeInsecureRequests: config.production ? [] : null } } }));
+  app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https:'], connectSrc: ["'self'", ...(config.intranetOrigin ? [config.intranetOrigin] : [])], frameAncestors: ["'none'"], upgradeInsecureRequests: config.production ? [] : null } } }));
   app.use(express.json({ limit: '256kb' })); app.use(cookieParser());
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  setupNetwork(app, config, store);
   const auth = setupAuth(app, store, config);
   app.get('/api/health', (req, res) => { one('SELECT 1'); fs.accessSync(path.join(store.root, 'files'), fs.constants.R_OK | fs.constants.W_OK); res.json({ ok: true, version: '1.1.0' }); });
   app.use('/api', (req, res, next) => {
@@ -65,15 +69,18 @@ export function createApp(options = {}) {
   };
   const filesFor = id => all('SELECT f.id,f.original_name AS name,f.size,f.checksum,f.created_at AS createdAt,u.name AS uploader FROM files f JOIN version_files vf ON f.id=vf.file_id JOIN users u ON f.uploader_id=u.id WHERE vf.version_id=? ORDER BY f.created_at,f.id', id);
   const descriptionAgent = createDescriptionAgent(config, store);
-  const versionData = (version, includeFiles = true, viewer = null, asset = null) => ({ id: version.id, number: version.number, status: version.status, description: viewer && asset ? descriptionFor(viewer, asset, parse(version.description)) : parse(version.description), revision: version.revision, submissionCount: version.submission_count, createdAt: version.created_at, updatedAt: version.updated_at, publishedAt: version.published_at, files: includeFiles ? filesFor(version.id) : [] });
+  run("UPDATE description_jobs SET status='failed',error=?,completed_at=? WHERE status IN ('pending','running')", '服务重启中断了生成任务，请重新生成', now());
+  const descriptionJobData = job => ({ id: job.id, status: job.status, result: job.status === 'complete' ? parse(job.result) : null, error: job.status === 'failed' ? job.error : '', baseRevision: job.base_revision, createdAt: job.created_at, completedAt: job.completed_at });
+  const versionData = (version, includeFiles = true, viewer = null, asset = null) => ({ id: version.id, number: version.number, status: version.status, description: viewer && asset ? descriptionFor(viewer, asset, parse(version.description)) : parse(version.description), revision: version.revision, submissionCount: version.submission_count, createdAt: version.created_at, updatedAt: version.updated_at, publishedAt: version.published_at, files: includeFiles ? filesFor(version.id) : [], requirements: requirements.forAsset(version.asset_id) });
   const event = (user, action, assetId = null, versionId = null, detail = {}) => run('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)', uid(), assetId, versionId, user.id, user.name, action, JSON.stringify(detail), now());
   const touch = id => run('UPDATE assets SET updated_at=?,revision=revision+1 WHERE id=?', now(), id);
   const settings = () => ({ ...parse(one('SELECT value FROM settings WHERE id=1').value), revision: one('SELECT revision FROM settings WHERE id=1').revision });
   const summary = (user, asset, includeFiles = true) => {
     const versions = all('SELECT * FROM versions WHERE asset_id=? ORDER BY number DESC', asset.id);
     const latest = versions[0];
-    return { id: asset.id, owner: publicUser(one('SELECT * FROM users WHERE id=?', asset.owner_id)), creator: publicUser(one('SELECT * FROM users WHERE id=?', asset.creator_id)), currentVersionId: asset.current_version_id, currentVersion: versions.find(v => v.id === asset.current_version_id)?.number || null, revision: asset.revision, createdAt: asset.created_at, updatedAt: asset.updated_at, latest: latest ? versionData(latest, includeFiles, user, asset) : null, versionCount: versions.length, canManage: manage(user, asset), canEdit: editAccess(user, asset), canGrant: has(user,'pm') || (has(user,'supervisor') && manage(user,asset)), accessLevel: permission(user,asset), businessRestricted: businessRestricted(user, asset) };
+    return { id: asset.id, owner: publicUser(one('SELECT * FROM users WHERE id=?', asset.owner_id)), creator: publicUser(one('SELECT * FROM users WHERE id=?', asset.creator_id)), currentVersionId: asset.current_version_id, currentVersion: versions.find(v => v.id === asset.current_version_id)?.number || null, revision: asset.revision, createdAt: asset.created_at, updatedAt: asset.updated_at, latest: latest ? versionData(latest, includeFiles, user, asset) : null, requirements: requirements.forAsset(asset.id), versionCount: versions.length, canManage: manage(user, asset), canEdit: editAccess(user, asset), canGrant: has(user,'pm') || (has(user,'supervisor') && manage(user,asset)), accessLevel: permission(user,asset), businessRestricted: businessRestricted(user, asset) };
   };
+  const requirements = createRequirements(app, store, { has, fail, assetFor, visible, editAccess, summary, event, touch, checkRevision, settings, documentToken: auth.documentToken });
   app.get('/api/catalog', (req, res) => {
     const { assets, ...catalog } = queryCatalog(store, req.user, req.query);
     res.json({ ...catalog, items: assets.map(a => summary(req.user, a, false)) });
@@ -101,12 +108,12 @@ export function createApp(options = {}) {
   });
   app.get('/api/description/jobs/:id', (req, res) => {
     const job = one('SELECT * FROM description_jobs WHERE id=?', req.params.id); if (!job || job.requester_id !== req.user.id) fail(404, '生成任务不存在');
-    res.json({ id: job.id, status: job.status, result: job.status === 'complete' ? parse(job.result) : null, error: job.status === 'failed' ? job.error : '', baseRevision: job.base_revision, createdAt: job.created_at, completedAt: job.completed_at });
+    res.json(descriptionJobData(job));
   });
   app.get('/api/versions/:id/description/jobs/latest', (req, res) => {
     versionFor(req.user, req.params.id);
-    const job = one("SELECT * FROM description_jobs WHERE version_id=? AND requester_id=? AND status='complete' ORDER BY completed_at DESC LIMIT 1", req.params.id, req.user.id);
-    res.json(job ? { id: job.id, status: job.status, result: parse(job.result), baseRevision: job.base_revision, createdAt: job.created_at, completedAt: job.completed_at } : null);
+    const job = one('SELECT * FROM description_jobs WHERE version_id=? AND requester_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1', req.params.id, req.user.id);
+    res.json(job && !['accepted', 'dismissed'].includes(job.status) ? descriptionJobData(job) : null);
   });
   app.post('/api/description/jobs/:id/review', (req, res) => {
     const action = z.object({ action: z.enum(['accepted','dismissed']) }).parse(req.body).action, job = one('SELECT * FROM description_jobs WHERE id=?', req.params.id);
@@ -127,16 +134,18 @@ export function createApp(options = {}) {
     if (!has(req.user, 'employee') && !has(req.user, 'supervisor')) fail(403, '当前角色不能创建 Demo');
     const description = descriptionSchema.parse(req.body.description || {});
     const requestId = req.body.requestId ? z.uuid().parse(req.body.requestId) : null;
+    const payload = JSON.stringify(req.body.requirementIds === undefined ? description : { ...description, requirementIds: req.body.requirementIds });
     const id = uid(), versionId = uid(), time = now();
     const result = tx(() => {
       if (requestId) {
         const cached = one('SELECT * FROM idempotency WHERE user_id=? AND request_id=?', req.user.id, requestId);
-        if (cached) { if (cached.payload !== JSON.stringify(description)) fail(409, '此请求已保存，请重新打开已创建的 Demo'); return parse(cached.result); }
+        if (cached) { if (cached.payload !== payload) fail(409, '此请求已保存，请重新打开已创建的 Demo'); return parse(cached.result); }
       }
       run('INSERT INTO assets(id,owner_id,creator_id,created_at,updated_at) VALUES(?,?,?,?,?)', id, req.user.id, req.user.id, time, time);
       run('INSERT INTO versions(id,asset_id,number,status,description,creator_id,created_at,updated_at) VALUES(?,?,1,?,?,?,?,?)', versionId, id, 'draft', JSON.stringify(description), req.user.id, time, time);
+      requirements.replace(req.user, { id }, req.body.requirementIds || []);
       event(req.user, 'create', id, versionId);
-      if (requestId) run('INSERT INTO idempotency VALUES(?,?,?,?)', req.user.id, requestId, JSON.stringify(description), JSON.stringify({ id, versionId }));
+      if (requestId) run('INSERT INTO idempotency VALUES(?,?,?,?)', req.user.id, requestId, payload, JSON.stringify({ id, versionId }));
       return { id, versionId };
     }); res.status(201).json(result);
   });
@@ -161,6 +170,10 @@ export function createApp(options = {}) {
     const { revision } = revisionSchema.parse(req.body), description = descriptionSchema.parse(req.body.description);
     tx(() => {
       const { asset, version } = versionFor(req.user, req.params.id); editable(req.user, asset, version); checkRevision(version, revision);
+      if (req.body.requirementIds !== undefined) {
+        checkRevision(asset, req.body.assetRevision);
+        requirements.replace(req.user, asset, req.body.requirementIds);
+      }
       run('UPDATE versions SET description=?,revision=revision+1,updated_at=? WHERE id=?', JSON.stringify(description), now(), version.id); touch(asset.id);
       event(req.user, 'edit', asset.id, version.id, { before: parse(version.description), after: description });
     }); res.json({ ok: true });
@@ -183,6 +196,7 @@ export function createApp(options = {}) {
     if (!files.length) fail(400, '请至少上传一个完整文件');
     if (files.length > conf.maxFiles || files.reduce((s, f) => s + f.size, 0) > conf.maxVersionMB * 1048576 || files.some(f => f.size > conf.maxFileMB * 1048576)) fail(400, '文件超过当前上传限制，请调整文件或联系管理员');
     for (const f of files) { const target = path.join(store.root, 'files', f.id); if (!fs.existsSync(target) || fs.statSync(target).size !== f.size) fail(409, '文件缺失或不完整，请重新上传'); }
+    if (!requirements.forAsset(version.asset_id).length) fail(400, '请先绑定至少一个需求，再提交或发布 Demo');
   };
   app.post('/api/versions/:id/actions', (req, res) => {
     const { revision, action, reason, supervisorId, ccUserIds } = revisionSchema.extend({ action: z.enum(['submit', 'withdraw', 'reject', 'publish', 'unpublish', 'restore', 'set_default']), reason: z.string().max(5000).default(''), supervisorId:z.string().optional(), ccUserIds:z.array(z.string()).max(100).default([]) }).parse(req.body);
@@ -202,7 +216,14 @@ export function createApp(options = {}) {
       } else {
         if (!manage(req.user, asset)) fail(403, '只有负责主管可以执行此操作');
         if (['reject', 'unpublish', 'restore'].includes(action) && !reason.trim()) fail(400, '请填写处理原因');
-        if (action === 'reject') { if (status !== 'pending') fail(409, '只能退回待审核版本'); status = 'returned'; }
+        if (action === 'reject') {
+          if (status !== 'pending') fail(409, '只能退回待审核版本'); status = 'returned';
+          const affected = requirements.forAsset(asset.id).filter(requirement => requirement.status === 'open');
+          for (const requirement of affected) {
+            run("UPDATE requirements SET status='needs_update',revision=revision+1,updated_at=? WHERE id=?", now(), requirement.id);
+            event(req.user, 'requirement_status', asset.id, version.id, { requirementId: requirement.id, from: 'open', to: 'needs_update', reason: 'demo_rejected' });
+          }
+        }
         if (action === 'publish') { if (!working.includes(status)) fail(409, '当前版本不可重复发布'); validatePublish(version); status = 'published'; for(const userId of [...new Set(ccUserIds)]) { const recipient=one('SELECT * FROM users WHERE id=? AND enabled=1',userId); if(!recipient||!parse(recipient.roles,[]).length) fail(400,'抄送人员中包含无效账号'); if(recipient.id!==req.user.id) run('INSERT OR IGNORE INTO version_cc VALUES(?,?,?,?)',version.id,recipient.id,req.user.id,now()); } }
         if (action === 'unpublish') { if (status !== 'published') fail(409, '只能下架已发布版本'); status = 'offline'; if (asset.current_version_id === version.id) run('UPDATE assets SET current_version_id=NULL WHERE id=?', asset.id); }
         if (action === 'restore') { if (status !== 'offline') fail(409, '只能恢复已下架版本'); validatePublish(version); status = 'published'; }
@@ -294,12 +315,43 @@ export function createApp(options = {}) {
     const input = revisionSchema.extend({ roles: z.array(z.enum(roles)).max(5), supervisorId: z.string().nullable(), enabled: z.boolean() }).parse(req.body);
     tx(() => {
       const target = one('SELECT * FROM users WHERE id=?', req.params.id); if (!target) fail(404, '用户不存在'); checkRevision(target, input.revision);
-      if (target.id === req.user.id && (!input.enabled || !input.roles.includes('admin'))) fail(400, '不能停用自己或移除自己的管理员权限');
-      if (input.supervisorId) { const s = one('SELECT * FROM users WHERE id=?', input.supervisorId); if (input.supervisorId === target.id || !s?.enabled || !has(s, 'supervisor')) fail(400, '请选择有效主管，不能选择本人'); }
-      if ((!input.enabled || !input.roles.includes('supervisor')) && one('SELECT id FROM users WHERE supervisor_id=?', target.id)) fail(400, '请先将该主管负责的员工转交其他主管');
-      if ((!input.enabled || !input.roles.some(r => ['employee', 'supervisor'].includes(r))) && one('SELECT id FROM assets WHERE owner_id=?', target.id)) fail(400, '请先交接该用户的 Demo，再停用或移除业务角色');
-      run('UPDATE users SET roles=?,supervisor_id=?,enabled=?,revision=revision+1 WHERE id=?', JSON.stringify([...new Set(input.roles)]), input.supervisorId, Number(input.enabled), target.id);
-      event(req.user, 'user_update', null, null, { user: target.name, before: publicUser(target), after: input });
+      if (target.deleted_at) fail(409, '请先恢复已删除账号，再配置权限');
+      if (target.enabled && has(target, 'admin') && (!input.enabled || !input.roles.includes('admin')) && !all('SELECT * FROM users WHERE enabled=1 AND deleted_at IS NULL AND id<>?', target.id).some(user => has(user, 'admin'))) fail(400, '至少保留一个已启用的管理员账号');
+      const supervisorId = input.enabled ? input.supervisorId : null;
+      if (supervisorId) { const s = one('SELECT * FROM users WHERE id=?', supervisorId); if (supervisorId === target.id || !s?.enabled || !has(s, 'supervisor')) fail(400, '请选择有效主管，不能选择本人'); }
+      if (input.enabled && !input.roles.includes('supervisor') && one('SELECT id FROM users WHERE supervisor_id=?', target.id)) fail(400, '请先将该主管负责的员工转交其他主管');
+      if (input.enabled && !input.roles.some(r => ['employee', 'supervisor'].includes(r)) && one('SELECT id FROM assets WHERE owner_id=?', target.id)) fail(400, '请先交接该用户的 Demo，再移除业务角色');
+      if (!input.enabled) { run('UPDATE users SET supervisor_id=NULL,revision=revision+1 WHERE supervisor_id=?', target.id); run('DELETE FROM sessions WHERE user_id=?', target.id); }
+      run('UPDATE users SET roles=?,supervisor_id=?,enabled=?,revision=revision+1 WHERE id=?', JSON.stringify([...new Set(input.roles)]), supervisorId, Number(input.enabled), target.id);
+      event(req.user, 'user_update', null, null, { user: target.name, before: publicUser(target), after: { ...input, supervisorId } });
+    }); res.json({ ok: true });
+  });
+  app.delete('/api/admin/users/:id', admin, (req, res) => {
+    const { revision } = revisionSchema.parse(req.body);
+    tx(() => {
+      const target = one('SELECT * FROM users WHERE id=?', req.params.id);
+      if (!target) fail(404, '用户不存在');
+      checkRevision(target, revision);
+      if (target.enabled) fail(409, '请先停用账号，再删除');
+      if (target.deleted_at) fail(409, '账号已删除，请刷新列表');
+      run('UPDATE users SET deleted_at=?,revision=revision+1 WHERE id=?', now(), target.id);
+      run('DELETE FROM sessions WHERE user_id=?', target.id);
+      run('DELETE FROM asset_permissions WHERE user_id=?', target.id);
+      run('DELETE FROM version_cc WHERE user_id=?', target.id);
+      run('DELETE FROM requirement_assignees WHERE user_id=?', target.id);
+      run('UPDATE users SET supervisor_id=NULL,revision=revision+1 WHERE supervisor_id=?', target.id);
+      event(req.user, 'user_delete', null, null, { userId: target.id, user: target.name });
+    }); res.json({ ok: true });
+  });
+  app.post('/api/admin/users/:id/restore', admin, (req, res) => {
+    const { revision } = revisionSchema.parse(req.body);
+    tx(() => {
+      const target = one('SELECT * FROM users WHERE id=?', req.params.id);
+      if (!target) fail(404, '用户不存在');
+      checkRevision(target, revision);
+      if (!target.deleted_at) fail(409, '账号尚未删除');
+      run('UPDATE users SET deleted_at=NULL,revision=revision+1 WHERE id=?', target.id);
+      event(req.user, 'user_restore', null, null, { userId: target.id, user: target.name });
     }); res.json({ ok: true });
   });
   app.get('/api/admin/assets', admin, (req, res) => res.json(all('SELECT a.id,a.owner_id,a.revision,v.description FROM assets a LEFT JOIN versions v ON v.id=(SELECT id FROM versions WHERE asset_id=a.id ORDER BY number DESC LIMIT 1)').map(a => ({ id: a.id, ownerId: a.owner_id, revision: a.revision, title: parse(a.description).title || '未命名 Demo' }))));
@@ -356,7 +408,7 @@ export function createApp(options = {}) {
     const disk = fs.statfsSync(store.root); res.json({ freeBytes: disk.bavail * disk.bsize, totalBytes: disk.blocks * disk.bsize, usedFileBytes: one('SELECT COALESCE(SUM(size),0) AS total FROM files').total, backup: parse(one("SELECT value FROM metadata WHERE key='last_backup'")?.value, null), backupTask,
       version: '1.1.0', uptime: Math.floor(process.uptime()), mode: config.demoMode ? 'preview' : 'production',
       feishu: { appId: !!config.appId, appSecret: !!config.appSecret, tenantKey: !!config.tenantKey, callback: config.origin + '/api/auth/callback' },
-      descriptionAgent: { key: !!config.descriptionAgentKey, url: !!config.descriptionAgentUrl, model: config.descriptionAgentModel || '' } });
+      descriptionAgent: { key: !!config.descriptionAgentKey, url: !!config.descriptionAgentUrl, model: config.descriptionAgentModel || '', transport: config.descriptionAgentTransport, apiFormat: config.descriptionAgentApiFormat } });
   });
   app.get('/api/admin/events', admin, (req, res) => res.json(all('SELECT * FROM events WHERE asset_id IS NULL ORDER BY created_at DESC LIMIT 100').map(e => ({ ...e, detail: parse(e.detail) }))));
   app.use('/api', (req, res) => res.status(404).json({ error: '接口不存在' }));

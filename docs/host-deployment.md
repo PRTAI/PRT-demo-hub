@@ -25,21 +25,114 @@
 
 已安装当前 Windows 用户的登录启动快捷方式 `PRT DataHub.lnk`，登录 Windows 后隐藏启动。它不是系统服务；无人登录时不保证启动，电脑休眠或关机会中断访问。可运行 `scripts/install-host-startup.ps1` 重建快捷方式；取消自动启动可删除 Windows 启动文件夹内此快捷方式。
 
-更新代码后执行：
+## 版本更新
+
+以下步骤用于现有 Windows 宿主机服务的版本更新。在实际运行服务的部署机上打开 PowerShell，进入保存 `.env.host` 和正式数据的项目目录。若当前工作目录没有这些文件，应先定位原部署目录；不要新建一个空数据目录替代正式库。
+
+### 1. 核对并备份
+
+确认使用 Node.js 24，原 `.env.host` 中的 `DEMO_MODE=false`、`DATA_DIR` 和 `APP_ORIGIN` 仍指向正式环境。现有记录中的数据目录是 `host-data/`，端口为 `8080`。本次不需要改变原有地址、飞书回调或防火墙规则。
 
 ```powershell
-npm run build
+node --version
+Test-Path .env.host
+node --env-file=.env.host scripts/backup.mjs
+if ($LASTEXITCODE -ne 0) { throw '备份失败，停止更新' }
+```
+
+确认输出 `Backup verified`，记录新的备份目录，并保存更新前的完整代码和 `dist/`。备份脚本会复制数据库和文件、校验大小及哈希，完成的备份目录内应有 `manifest.json`。更新安排在短暂维护窗口内，备份及停机期间暂停业务写入。
+
+### 2. 停止服务并同步代码
+
+```powershell
 .\scripts\stop-host.ps1
+```
+
+若在另一台机器上开发，将本次完整源码同步到部署目录，包括新增的 `server/requirements.mjs`、`src/Requirements.jsx`、`src/requirements.css` 及其他修改文件；仅复制 `dist/` 无法更新后端。当前工作区存在未提交及新增文件，单独执行 `git pull` 不会取得这些修改。部署目录原有的 `.env.host`、正式数据、`backups/` 和 `.host-runtime/` 应保留；如果直接在原部署目录开发，则无需重复同步。
+
+### 3. 安装、检查和构建
+
+```powershell
+npm ci --include=dev
+if ($LASTEXITCODE -ne 0) { throw '依赖安装失败，停止更新' }
+npm test
+if ($LASTEXITCODE -ne 0) { throw '测试失败，停止更新' }
+npm run build
+if ($LASTEXITCODE -ne 0) { throw '前端构建失败，停止更新' }
+```
+
+本次开发工作区已通过 56 项自动化测试和前端构建，部署机仍需确认本机依赖安装与构建成功。构建工具属于开发依赖，因此安装时显式包含开发依赖。保留原有正式配置和真实数据，后端首次启动会自动创建需求及绑定关系表，无需手动执行 SQL，也不会向正式库插入体验样例。
+
+AI 配置按 [DeepSeek 官方 Pro 配置](deepseek-configuration.md)迁移。数据说明和智能检索共用官方 Key、地址和模型，旧阿里云和独立数据说明的连接配置不再读取。AI 自检会调用真实模型接口，使用内置合成数据。
+
+### 4. 启动与验证
+
+```powershell
 .\scripts\start-host.ps1
 ```
 
-在线备份：
+等待数秒后检查：
 
 ```powershell
-node --env-file=.env.host scripts/backup.mjs
+Invoke-RestMethod -Uri 'http://127.0.0.1:8080/api/health'
+Get-Content .host-runtime/server.log -Tail 80
 ```
 
+健康接口应返回 `ok: true`，再从统一的局域网地址打开页面，强制刷新或重新登录，按[操作手册的部署验收流程](user-manual.md#部署更新与验收)验证需求中心、绑定校验和发布通知。启动脚本打印“started”只表示已发起后台进程；健康接口和日志才用于确认服务启动结果。`/api/health` 中的版本号本次仍为 `1.1.0`，不能仅凭版本号判断新功能是否部署成功。
+
+发布或恢复发布会通知全部已启用产品经理及关联需求的商务发布人。真实送达还需要机器人、`im:message:send_as_bot` 权限和接收人的飞书应用可用范围有效。管理员在“平台设置 → 飞书通知”刷新记录，检查送达情况。
+
+### 5. 失败回退
+
+如果依赖安装、测试、构建或启动失败，先查看错误和日志，不继续执行后续步骤。需要回退代码时，停止服务，恢复更新前保存的完整代码及前端产物，按对应的 `package-lock.json` 重新安装依赖，再启动并检查健康状态。
+
+只有确需回退数据时才使用备份恢复；先保留故障时的数据副本。恢复脚本要求目标目录尚不存在，可执行 `node scripts/restore.mjs "备份目录" "新的数据目录"`，成功后将 `.env.host` 的 `DATA_DIR` 改为恢复目录，再启动服务并重新登录。数据回退会舍弃备份之后的新增或修改，不能直接用旧备份覆盖仍在使用的数据目录。
+
+## 网络地址变更
+
 IP 改变时，需要一起更新 `.env.host` 的 `APP_ORIGIN`、飞书重定向地址及防火墙本机地址，然后重启服务。请从统一的局域网地址发起飞书登录，避免本机地址与局域网地址混用导致 OAuth 状态 Cookie 不匹配。
+
+## AI 数据说明配置与排查
+
+数据说明和智能检索统一使用 `.env.host` 中的 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL=https://api.deepseek.com`、`DEEPSEEK_MODEL=deepseek-v4-pro` 和 `DEEPSEEK_ENABLE_THINKING=false`。管理员可在“平台设置 → 运行状态 → 数据说明 Agent”查看实际配置的模型。详细配置及旧变量删除清单见 [统一模型配置](deepseek-configuration.md)。
+
+直接通过官方 HTTP 接口调用，不需要安装 Claude Code。可选参数如下，修改后重启服务：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DEEPSEEK_ENABLE_THINKING` | `false` | 两处功能共用，向官方接口发送原生思考开关。Pro 型号保持不变。 |
+| `DESCRIPTION_AGENT_MAX_TOKENS` | 留空 | 默认省略 `max_tokens`，使用模型服务默认额度。按需填写 1024～32768 的整数，且须符合实际模型限制。 |
+| `DESCRIPTION_AGENT_TIMEOUT_MS` | `180000` | 单个后台任务的总时限，包含材料抽样、模型调用和重试，最多允许 600000 毫秒。 |
+| `DESCRIPTION_AGENT_REQUEST_TIMEOUT_MS` | `90000` | 每次模型调用的时限，包含响应正文读取；始终受任务总时限约束，最多允许 600000 毫秒。 |
+| `RAG_LLM_MAX_TOKENS` | 留空 | 默认省略 `max_tokens`；按需填写 1024～32768 的整数限制每轮输出，截断时回退本地检索。 |
+| `RAG_LLM_REQUEST_TIMEOUT_MS` | `90000` | 智能检索每轮请求时限。 |
+
+模型接口遇到连接中断、请求超时、HTTP 429 或临时服务错误时，最多重试一次，遵守 `Retry-After` 和总时限；认证及地址错误直接报告。分析材料总量最多约 30000 字符、最多抽样 12 个文本文件，以控制大 ZIP 或多文件任务的请求大小。大文本文件读取开头片段，不再因超过 1 MB 而完全忽略。
+
+任务仍在后台执行，生成结果经人工审查后应用到草稿。重新进入编辑页会恢复进行中任务或显示最近失败原因；服务重启会将中断任务标为失败，允许再次生成。若提示 HTTP 401/403，检查密钥和模型权限；HTTP 404 检查协议、地址及模型名称；持续超时应结合供应商状态和网络检查，避免只增加等待时间。
+
+### DeepSeek 官方 Pro 接入与自检
+
+在部署机的 `.env.host` 配置：
+
+```dotenv
+DEEPSEEK_API_KEY=填写DeepSeek官方Key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_ENABLE_THINKING=false
+```
+
+原阿里云 Key 不能用于官方接口。旧 `DASHSCOPE_*`、`RAG_LLM_MODEL` 及数据说明独立的连接配置不再读取；须填写新的共享配置，否则智能检索回退本地搜索，数据说明提示缺少 Key。
+
+在重启服务之前，可先运行独立自检：
+
+```powershell
+node --env-file=.env.host scripts/check-description-agent.mjs --all
+```
+
+自检只发送合成 CSV 和合成 Demo，不读取真实 Demo、不修改数据库，也不输出 API Key；会打印模型、接口地址、思考开关和耗时，并验证检索工具调用。看到说明及智能检索均“自检成功”后，再按本页步骤构建并重启，最后用一份小 CSV 和一份常见 ZIP 分别验证页面生成、退出后重新进入及应用结果。
+
+官方参考：[DeepSeek 模型列表](https://api-docs.deepseek.com/quick_start/pricing)、[思考模式说明](https://api-docs.deepseek.com/guides/thinking_mode)。
 
 ## 验证记录
 
@@ -65,11 +158,11 @@ ZIP 可逐层打开文件夹，点击包内文件预览。RAR、7z、嵌套 ZIP 
 
 ## 飞书审核通知
 
-员工点击提交审核后，将提醒其当前负责主管；主管从待审核状态审核通过并发布后，抄送平台内所有已启用的产品经理。主管直接发布自己的草稿不触发本轮“审核通过”抄送。草稿上传不发送消息。
+员工点击提交审核后，将提醒本次指定的审核主管；Demo 审核通过发布、直接发布或恢复发布后，自动通知平台内全部已启用的产品经理，以及关联需求中仍具有商务角色的商务发布人。产品经理和对应商务即使是操作人也接收通知，多需求、兼任角色与手动抄送按接收人去重。归属员工及额外抄送沿用现有规则，产品经理发布的需求不额外通知无关联商务。草稿上传不发送消息。
 
-队列与业务变更在同一个数据库事务中提交，服务每 5 秒处理一次；失败最多尝试 5 次，保留飞书请求去重 UUID。发送前复核角色、主管归属、版本状态及审核轮次。通知内容包含 Demo 名称、版本、员工及平台详情入口，不发送原文件。发送失败不回滚业务操作。
+队列与业务变更在同一个数据库事务中提交，服务每 5 秒处理一次；失败最多尝试 5 次，保留飞书请求去重 UUID。发送前复核账号启用状态、角色、审核主管、商务发布人与当前需求绑定关系、版本状态及审核轮次。发布通知包含 Demo 名称、版本、员工、发布时的关联需求标题及平台详情入口，不发送原文件或成本等说明字段。发送失败不回滚业务操作。
 
-管理员可在“平台设置 → 飞书通知”查看最近 100 条记录，并在修复配置后手动重试失败记录。没有产品经理时记录未配置接收人，不向管理员或其他员工替代抄送。历史已提交/已发布数据不补发。
+管理员可在“平台设置 → 飞书通知”查看最近 100 条记录，并在修复配置后手动重试失败记录。没有有效接收人时记录跳过，不向管理员或其他员工替代抄送。历史已提交/已发布数据不补发。飞书应用可用范围需包含接收通知的产品经理和对应商务。
 
 2026-09-03 接口检查：应用鉴权成功，但 bot/v3/info 返回 11205（app do not have bot）。需要在飞书开发者后台启用机器人能力，申请应用身份权限 im:message:send_as_bot，并发布审核生效；可用范围须包含主管与产品经理。真实消息送达尚待该配置完成后联调。业务及模拟飞书发送测试已通过。
 

@@ -19,6 +19,9 @@ export function seedPreview(store) {
       ['preview-unassigned', '待分配用户', [], null],
     ];
     for (const [id, name, roles, supervisor] of users) run('INSERT INTO users(id,open_id,name,roles,supervisor_id,created_at) VALUES(?,?,?,?,?,?)', id, 'preview:' + id, name, JSON.stringify(roles), supervisor, now());
+    const requirementId = uid();
+    run("INSERT INTO requirements(id,title,content,category,status,publisher_id,created_at,updated_at) VALUES(?,?,?,?,'open',?,?,?)", requirementId, '企业业务分析演示样例', '准备可复用的合成数据，支持零售、金融、工业等业务场景的分析和演示。仅用于功能体验。', '通用数据', 'preview-pm', now(), now());
+    for (const [id] of users.filter(user => user[0] !== 'preview-unassigned')) run('INSERT INTO requirement_assignees VALUES(?,?,?,?)', requirementId, id, 'preview-pm', now());
     const samples = [
       ['零售门店销售分析', '覆盖门店、商品与交易的完整分析样例，支持销售趋势和经营看板演示。', '零售与消费', ['经营分析', '多表关联'], 'published', 'preview-employee', 'retail_sales.csv'],
       ['银行客户分群数据集', '面向客户画像与分群场景，包含客户基础属性及行为特征。', '金融服务', ['客户画像', '分群'], 'pending', 'preview-colleague', 'customer_segments.json'],
@@ -35,6 +38,7 @@ export function seedPreview(store) {
       const bytes = Buffer.from(filename.endsWith('.json') ? JSON.stringify([{ id: 1, region: '华东', value: 128 }, { id: 2, region: '华南', value: 96 }], null, 2) : '\uFEFFid,region,value\n1,华东,128\n2,华南,96\n');
       fs.writeFileSync(path.join(store.root, 'files', fileId), bytes);
       run('INSERT INTO assets(id,owner_id,creator_id,current_version_id,created_at,updated_at) VALUES(?,?,?,?,?,?)', assetId, owner, owner, status === 'published' ? versionId : null, time, time);
+      run('INSERT INTO asset_requirements VALUES(?,?,?,?)', assetId, requirementId, owner, time);
       run('INSERT INTO versions(id,asset_id,number,status,description,submission_count,creator_id,created_at,updated_at,published_at) VALUES(?,?,1,?,?,?,?,?,?,?)', versionId, assetId, status, JSON.stringify(description), ['pending', 'returned'].includes(status) ? 1 : 0, owner, time, time, status === 'published' ? time : null);
       run('INSERT INTO files VALUES(?,?,?,?,?,?)', fileId, filename, bytes.length, createHash('sha256').update(bytes).digest('hex'), owner, time);
       run('INSERT INTO version_files VALUES(?,?)', versionId, fileId);
