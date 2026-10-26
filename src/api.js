@@ -11,6 +11,14 @@ export async function api(url, options = {}) {
   if (!response.ok) throw failure(data.error || '请求失败，请稍后重试', response.status);
   return data;
 }
+export async function downloadFile(url, filename, { signal } = {}) {
+  const response = await fetch('/api' + url, { credentials: 'same-origin', signal, headers: { 'X-Requested-With': 'PRT' } });
+  if (!response.ok) { const data = await response.json().catch(() => ({})); throw failure(data.error || '导出失败，请稍后重试', response.status); }
+  const file = await response.blob(), objectUrl = URL.createObjectURL(file), link = document.createElement('a');
+  link.href = objectUrl; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+}
 export async function streamApi(url, body, onEvent) {
   const response = await fetch('/api' + url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'PRT', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) });
   if (!response.ok) { const data = await response.json().catch(() => ({})); throw failure(data.error || '请求失败，请稍后重试', response.status); }

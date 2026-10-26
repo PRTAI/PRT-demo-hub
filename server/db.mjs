@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { defaultResponsibility } from '../shared/requirement-owners.mjs';
 
 export const uid = () => randomUUID();
 export const now = () => new Date().toISOString();
@@ -108,7 +109,19 @@ export function openStore(directory) {
       PRAGMA foreign_keys=ON;`);
   }
   if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'deleted_at')) db.exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
+  if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'planned_date')) db.exec("ALTER TABLE requirements ADD COLUMN planned_date TEXT NOT NULL DEFAULT ''");
+  if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'deadline_date')) db.exec("ALTER TABLE requirements ADD COLUMN deadline_date TEXT NOT NULL DEFAULT ''");
+  if (!db.prepare('PRAGMA table_info(requirement_assignees)').all().some(column => column.name === 'responsibility')) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec("ALTER TABLE requirement_assignees ADD COLUMN responsibility TEXT NOT NULL DEFAULT 'development' CHECK(responsibility IN ('business','development','both'))");
+      const update = db.prepare('UPDATE requirement_assignees SET responsibility=? WHERE requirement_id=? AND user_id=?');
+      for (const assignee of db.prepare('SELECT ra.requirement_id,ra.user_id,u.roles FROM requirement_assignees ra JOIN users u ON u.id=ra.user_id').all()) update.run(defaultResponsibility(parse(assignee.roles, [])), assignee.requirement_id, assignee.user_id);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
   if (!db.prepare('PRAGMA table_info(oauth_states)').all().some(column => column.name === 'origin')) db.exec("ALTER TABLE oauth_states ADD COLUMN origin TEXT NOT NULL DEFAULT ''");
+  if (!db.prepare('PRAGMA table_info(oauth_states)').all().some(column => column.name === 'return_path')) db.exec("ALTER TABLE oauth_states ADD COLUMN return_path TEXT NOT NULL DEFAULT '/'");
   if (!db.prepare('PRAGMA table_info(versions)').all().some(column => column.name === 'reviewer_id')) db.exec('ALTER TABLE versions ADD COLUMN reviewer_id TEXT REFERENCES users(id)');
   const permissionSql=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='asset_permissions'").get()?.sql || '';
   if (!permissionSql.includes("'upload'")) db.exec(`PRAGMA foreign_keys=OFF; ALTER TABLE asset_permissions RENAME TO asset_permissions_old;

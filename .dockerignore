@@ -11,3 +11,14 @@ test-results
 host-data
 .host-runtime
 *.log
+.DS_Store
+Thumbs.db
+Desktop.ini
+coverage
+.vite
+.cache
+*.sqlite
+*.sqlite-*
+*.db
+*.db-wal
+*.db-shm

@@ -1,6 +1,6 @@
 import { createApp } from './app.mjs';
 import { validateBinding } from './runtime.mjs';
-const { app, config, store, notifications } = createApp();
+const { app, config, store, notifications, requirementCalendar, requirementWiki } = createApp();
 const host = process.env.HOST || '127.0.0.1', port = Number(process.env.PORT || 3100);
 validateBinding({ ...config, host, containerPreview: process.env.CONTAINER_PREVIEW === 'true' });
 for (const entry of (await import('node:fs')).readdirSync(store.root + '/tmp', { withFileTypes: true })) {
@@ -17,11 +17,15 @@ const server = app.listen(port, host, error => {
 });
 server.requestTimeout = 30 * 60 * 1000;
 const stopNotifications = notifications.start();
+const stopRequirementCalendar = requirementCalendar.start();
+const stopRequirementWiki = requirementWiki.start();
 let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
   console.log(`Received ${signal}; shutting down server`);
   if (stopping) return; stopping = true; stopNotifications();
-  server.close(() => { store.db.close(); process.exit(0); });
+  const calendarStopped = stopRequirementCalendar();
+  const wikiStopped = stopRequirementWiki();
+  server.close(async () => { await Promise.all([calendarStopped, wikiStopped]); store.db.close(); process.exit(0); });
   server.closeIdleConnections();
   setTimeout(() => process.exit(1), 30000).unref();
 });

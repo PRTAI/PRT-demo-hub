@@ -1,8 +1,10 @@
 node_modules/
 dist/
+# Credentials stay local; only blank configuration templates belong in Git.
 .env
 .env.*
 !.env.example
+!.env.*.example
 data/
 .preview-data/
 backups/
@@ -12,11 +14,19 @@ test-results/
 host-data/
 .host-runtime/
 
-# New documentation (excluded from source branch)
-docs/deepseek-configuration.md
-docs/fresh-windows-deployment.md
-docs/requirements-network-update.md
-docs/requirements.md
-docs/restore-windows-deployment.md
-docs/user-manual.md
-docs/windows-docker-guide.md
+# Local databases, generated reports and editor/OS files.
+*.sqlite
+*.sqlite-*
+*.db
+*.db-wal
+*.db-shm
+coverage/
+.vite/
+.cache/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+*.tsbuildinfo

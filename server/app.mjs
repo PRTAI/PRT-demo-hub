@@ -1,5 +1,7 @@
 import express from 'express';
 import { createNotifications } from './notifications.mjs';
+import { createRequirementCalendar } from './requirement-calendar.mjs';
+import { createRequirementWiki } from './requirement-wiki.mjs';
 import { servePreview } from './preview.mjs';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -32,12 +34,16 @@ export function createApp(options = {}) {
   if (config.production && config.demoMode) throw new Error('Production refuses DEMO_MODE');
   if (config.production && !config.origin.startsWith('https://')) throw new Error('Production APP_ORIGIN must use HTTPS');
   validateOrigin(config.origin);
+  config.requirementCalendarId = options.requirementCalendarId ?? process.env.FEISHU_REQUIREMENT_CALENDAR_ID?.trim() ?? '';
+  config.requirementWikiSampleUrl = options.requirementWikiSampleUrl ?? process.env.FEISHU_REQUIREMENT_WIKI_SAMPLE_URL?.trim() ?? '';
   const store = openStore(config.dataDir), { one, all, run, tx } = store;
   const mode = one("SELECT value FROM metadata WHERE key='mode'");
   if (mode && mode.value !== (config.demoMode ? 'preview' : 'production')) { store.db.close(); throw new Error('Preview and production must use separate data directories'); }
   run("INSERT OR IGNORE INTO metadata VALUES('mode',?)", config.demoMode ? 'preview' : 'production');
   if (config.demoMode) seedPreview(store);
   const notifications = createNotifications(store, config);
+  const requirementCalendar = createRequirementCalendar(store, config, notifications);
+  const requirementWiki = createRequirementWiki(store, config);
   const app = express(); app.disable('x-powered-by');
   app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https:'], connectSrc: ["'self'", ...(config.intranetOrigin ? [config.intranetOrigin] : [])], frameAncestors: ["'none'"], upgradeInsecureRequests: config.production ? [] : null } } }));
   app.use(express.json({ limit: '256kb' })); app.use(cookieParser());
@@ -73,14 +79,14 @@ export function createApp(options = {}) {
   const descriptionJobData = job => ({ id: job.id, status: job.status, result: job.status === 'complete' ? parse(job.result) : null, error: job.status === 'failed' ? job.error : '', baseRevision: job.base_revision, createdAt: job.created_at, completedAt: job.completed_at });
   const versionData = (version, includeFiles = true, viewer = null, asset = null) => ({ id: version.id, number: version.number, status: version.status, description: viewer && asset ? descriptionFor(viewer, asset, parse(version.description)) : parse(version.description), revision: version.revision, submissionCount: version.submission_count, createdAt: version.created_at, updatedAt: version.updated_at, publishedAt: version.published_at, files: includeFiles ? filesFor(version.id) : [], requirements: requirements.forAsset(version.asset_id) });
   const event = (user, action, assetId = null, versionId = null, detail = {}) => run('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)', uid(), assetId, versionId, user.id, user.name, action, JSON.stringify(detail), now());
-  const touch = id => run('UPDATE assets SET updated_at=?,revision=revision+1 WHERE id=?', now(), id);
+  const touch = id => { run('UPDATE assets SET updated_at=?,revision=revision+1 WHERE id=?', now(), id); requirementWiki.enqueueForAsset(id); };
   const settings = () => ({ ...parse(one('SELECT value FROM settings WHERE id=1').value), revision: one('SELECT revision FROM settings WHERE id=1').revision });
   const summary = (user, asset, includeFiles = true) => {
     const versions = all('SELECT * FROM versions WHERE asset_id=? ORDER BY number DESC', asset.id);
     const latest = versions[0];
     return { id: asset.id, owner: publicUser(one('SELECT * FROM users WHERE id=?', asset.owner_id)), creator: publicUser(one('SELECT * FROM users WHERE id=?', asset.creator_id)), currentVersionId: asset.current_version_id, currentVersion: versions.find(v => v.id === asset.current_version_id)?.number || null, revision: asset.revision, createdAt: asset.created_at, updatedAt: asset.updated_at, latest: latest ? versionData(latest, includeFiles, user, asset) : null, requirements: requirements.forAsset(asset.id), versionCount: versions.length, canManage: manage(user, asset), canEdit: editAccess(user, asset), canGrant: has(user,'pm') || (has(user,'supervisor') && manage(user,asset)), accessLevel: permission(user,asset), businessRestricted: businessRestricted(user, asset) };
   };
-  const requirements = createRequirements(app, store, { has, fail, assetFor, visible, editAccess, summary, event, touch, checkRevision, settings, documentToken: auth.documentToken });
+  const requirements = createRequirements(app, store, { has, fail, assetFor, visible, editAccess, summary, event, touch, checkRevision, settings, notifications, requirementCalendar, requirementWiki, demoMode: config.demoMode, documentToken: auth.documentToken });
   app.get('/api/catalog', (req, res) => {
     const { assets, ...catalog } = queryCatalog(store, req.user, req.query);
     res.json({ ...catalog, items: assets.map(a => summary(req.user, a, false)) });
@@ -183,6 +189,7 @@ export function createApp(options = {}) {
       const { asset, version } = versionFor(req.user, req.params.id); editable(req.user, asset, version); checkRevision(version, revisionSchema.parse(req.body).revision);
       if (version.status !== 'draft' || version.submission_count) fail(409, '只能删除从未提交的草稿');
       const snapshot = versionData(version);
+      requirementWiki.enqueueForAsset(asset.id);
       run('DELETE FROM versions WHERE id=?', version.id); event(req.user, 'delete_draft', asset.id, version.id, { version: snapshot });
       if (!one('SELECT id FROM versions WHERE asset_id=?', asset.id)) run('DELETE FROM assets WHERE id=?', asset.id); else touch(asset.id);
     }); res.json({ ok: true });
@@ -194,7 +201,7 @@ export function createApp(options = {}) {
     if (version.number > 1 && !d.changes?.trim()) fail(400, '请填写本次变更说明');
     const files = filesFor(version.id);
     if (!files.length) fail(400, '请至少上传一个完整文件');
-    if (files.length > conf.maxFiles || files.reduce((s, f) => s + f.size, 0) > conf.maxVersionMB * 1048576 || files.some(f => f.size > conf.maxFileMB * 1048576)) fail(400, '文件超过当前上传限制，请调整文件或联系管理员');
+    if (files.length > conf.maxFiles) fail(400, '文件数量超过当前上传限制，请调整文件或联系管理员');
     for (const f of files) { const target = path.join(store.root, 'files', f.id); if (!fs.existsSync(target) || fs.statSync(target).size !== f.size) fail(409, '文件缺失或不完整，请重新上传'); }
     if (!requirements.forAsset(version.asset_id).length) fail(400, '请先绑定至少一个需求，再提交或发布 Demo');
   };
@@ -221,6 +228,7 @@ export function createApp(options = {}) {
           const affected = requirements.forAsset(asset.id).filter(requirement => requirement.status === 'open');
           for (const requirement of affected) {
             run("UPDATE requirements SET status='needs_update',revision=revision+1,updated_at=? WHERE id=?", now(), requirement.id);
+            requirementCalendar.enqueue(requirement.id);
             event(req.user, 'requirement_status', asset.id, version.id, { requirementId: requirement.id, from: 'open', to: 'needs_update', reason: 'demo_rejected' });
           }
         }
@@ -240,8 +248,7 @@ export function createApp(options = {}) {
     try {
       let context = versionFor(req.user, req.params.id); editable(req.user, context.asset, context.version);
       const revision = Number(req.get('x-revision')); checkRevision(context.version, revision);
-      const conf = settings();
-      const upload = multer({ storage: multer.diskStorage({ destination: path.join(store.root, 'tmp'), filename: (r, f, cb) => cb(null, uid()) }), limits: { fileSize: conf.maxFileMB * 1048576, files: 1, fields: 0, parts: 2 } }).single('file');
+      const upload = multer({ storage: multer.diskStorage({ destination: path.join(store.root, 'tmp'), filename: (r, f, cb) => cb(null, uid()) }), limits: { files: 1, fields: 0, parts: 2 } }).single('file');
       await new Promise((resolve, reject) => upload(req, res, err => err ? reject(err) : resolve()));
       uploaded = req.file;
       if (!uploaded || uploaded.size === 0) fail(400, '请选择非空文件');
@@ -256,7 +263,7 @@ export function createApp(options = {}) {
         if (!user?.enabled || !parse(user.roles, []).length) fail(403, '当前账号已失去访问权限');
         context = versionFor(user, req.params.id); editable(user, context.asset, context.version); checkRevision(context.version, revision);
         const files = filesFor(context.version.id), limits = settings();
-        if (files.length >= limits.maxFiles || uploaded.size > limits.maxFileMB * 1048576 || files.reduce((s, f) => s + f.size, 0) + uploaded.size > limits.maxVersionMB * 1048576) fail(400, '文件数量或总大小超过限制');
+        if (files.length >= limits.maxFiles) fail(400, '文件数量超过限制');
         fs.renameSync(uploaded.path, path.join(store.root, 'files', fileId)); uploaded.finalPath = path.join(store.root, 'files', fileId);
         run('INSERT INTO files VALUES(?,?,?,?,?,?)', fileId, name, uploaded.size, checksum.digest('hex'), user.id, now());
         run('INSERT INTO version_files VALUES(?,?)', context.version.id, fileId);
@@ -306,6 +313,19 @@ export function createApp(options = {}) {
   });
   const admin = (req, res, next) => { if (!has(req.user, 'admin')) fail(403, '需要管理员权限'); next(); };
   app.get('/api/admin/notifications', admin, (req, res) => res.json(notifications.list()));
+  app.get('/api/admin/requirement-calendar', admin, (req, res) => res.json(requirementCalendar.list()));
+  app.get('/api/admin/requirement-wiki', admin, (req, res) => res.json(requirementWiki.list()));
+  app.post('/api/admin/requirement-wiki/:id/retry', admin, (req, res) => {
+    if (!one('SELECT id FROM requirements WHERE id=?', req.params.id)) fail(404, '需求不存在');
+    if (!requirementWiki.retry(req.params.id)) fail(409, '文档正在同步，请稍后刷新');
+    event(req.user, 'requirement_wiki_retry', null, null, { requirementId: req.params.id });
+    res.json(requirementWiki.info(req.params.id));
+  });
+  app.post('/api/admin/requirement-calendar/:id/retry', admin, (req, res) => {
+    if (!requirementCalendar.retry(req.params.id)) fail(409, '仅失败的日历任务可以重试，请刷新后查看状态');
+    event(req.user, 'requirement_calendar_retry', null, null, { requirementId: req.params.id });
+    res.json({ ok: true });
+  });
   app.post('/api/admin/notifications/:id/retry', admin, (req, res) => {
     run("UPDATE notifications SET status='pending',attempts=0,next_at=0 WHERE id=? AND status='failed'", req.params.id);
     res.json({ ok: true });
@@ -323,6 +343,8 @@ export function createApp(options = {}) {
       if (input.enabled && !input.roles.some(r => ['employee', 'supervisor'].includes(r)) && one('SELECT id FROM assets WHERE owner_id=?', target.id)) fail(400, '请先交接该用户的 Demo，再移除业务角色');
       if (!input.enabled) { run('UPDATE users SET supervisor_id=NULL,revision=revision+1 WHERE supervisor_id=?', target.id); run('DELETE FROM sessions WHERE user_id=?', target.id); }
       run('UPDATE users SET roles=?,supervisor_id=?,enabled=?,revision=revision+1 WHERE id=?', JSON.stringify([...new Set(input.roles)]), supervisorId, Number(input.enabled), target.id);
+      requirementCalendar.enqueueForUser(target.id);
+      requirementWiki.enqueueForUser(target.id);
       event(req.user, 'user_update', null, null, { user: target.name, before: publicUser(target), after: { ...input, supervisorId } });
     }); res.json({ ok: true });
   });
@@ -338,6 +360,8 @@ export function createApp(options = {}) {
       run('DELETE FROM sessions WHERE user_id=?', target.id);
       run('DELETE FROM asset_permissions WHERE user_id=?', target.id);
       run('DELETE FROM version_cc WHERE user_id=?', target.id);
+      requirementCalendar.enqueueForUser(target.id);
+      requirementWiki.enqueueForUser(target.id);
       run('DELETE FROM requirement_assignees WHERE user_id=?', target.id);
       run('UPDATE users SET supervisor_id=NULL,revision=revision+1 WHERE supervisor_id=?', target.id);
       event(req.user, 'user_delete', null, null, { userId: target.id, user: target.name });
@@ -351,6 +375,8 @@ export function createApp(options = {}) {
       checkRevision(target, revision);
       if (!target.deleted_at) fail(409, '账号尚未删除');
       run('UPDATE users SET deleted_at=NULL,revision=revision+1 WHERE id=?', target.id);
+      requirementCalendar.enqueueForUser(target.id);
+      requirementWiki.enqueueForUser(target.id);
       event(req.user, 'user_restore', null, null, { userId: target.id, user: target.name });
     }); res.json({ ok: true });
   });
@@ -422,5 +448,5 @@ export function createApp(options = {}) {
     console.error(`[${now()}] ${req.method} request failed`, err.code || err.name, err.message);
     res.status(500).json({ error: '操作失败，请稍后重试；如持续出现请联系管理员' });
   });
-  return { app, store, config, notifications };
+  return { app, store, config, notifications, requirementCalendar, requirementWiki };
 }

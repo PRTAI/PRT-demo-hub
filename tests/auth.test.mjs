@@ -57,3 +57,19 @@ test('Feishu callback validates browser-bound state, tenant, replay and bootstra
   assert.deepEqual((await agent.get('/api/auth/me')).body.user.roles, []);
   await agent.get('/api/assets').expect(403);
 });
+
+test('Feishu login returns requirement notifications to their detail page and rejects external redirect input', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-requirement-oauth-'));
+  const { app, store } = createApp({ demoMode: false, production: false, dataDir: root, appId: 'cli_test', appSecret: 'test-only', tenantKey: 'allowed-enterprise', origin: 'http://127.0.0.1:3100', fetch: async url => {
+    if (url.endsWith('/oauth/token')) return { ok: true, json: async () => ({ access_token: 'fake-token' }) };
+    return { ok: true, json: async () => ({ code: 0, data: { open_id: 'ou_user', name: '负责人', tenant_key: 'allowed-enterprise' } }) };
+  } });
+  t.after(() => { store.db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const id = '00000000-0000-4000-8000-000000000001';
+  for (const requirement of [id, 'https://attacker.example', '//attacker.example']) {
+    const agent = request.agent(app), begin = await agent.get('/api/auth/feishu').query({ requirement }).expect(302);
+    const state = new URL(begin.headers.location).searchParams.get('state');
+    const callback = await agent.get('/api/auth/callback').query({ state, code: 'test-code' }).expect(302);
+    assert.equal(callback.headers.location, requirement === id ? '/?view=requirements&requirement=' + id : '/');
+  }
+});

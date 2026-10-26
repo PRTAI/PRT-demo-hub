@@ -57,7 +57,9 @@ export function setupAuth(app, store, config) {
     const state = secret(), verifier = secret();
     run('DELETE FROM oauth_states WHERE expires<?', Date.now());
     const origin = requestOrigin(req);
-    run('INSERT INTO oauth_states(state,verifier,expires,origin) VALUES(?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin);
+    const requirementId = typeof req.query.requirement === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.query.requirement) ? req.query.requirement : '';
+    const returnPath = requirementId ? '/?' + new URLSearchParams({ view: 'requirements', requirement: requirementId }) : '/';
+    run('INSERT INTO oauth_states(state,verifier,expires,origin,return_path) VALUES(?,?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin, returnPath);
     res.cookie(oauthName, state, { ...cookies, maxAge: 600000 });
     const url = new URL('https://accounts.feishu.cn/open-apis/authen/v1/authorize');
     url.search = new URLSearchParams({ client_id: config.appId, response_type: 'code', redirect_uri: origin + '/api/auth/callback', state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' }).toString();
@@ -88,7 +90,7 @@ export function setupAuth(app, store, config) {
       });
       if (!user.enabled || user.deleted_at) return res.redirect('/?authError=' + encodeURIComponent('账号已停用或删除，请联系管理员'));
       if (req.cookies[sessionName]) run('DELETE FROM sessions WHERE token=?', hash(req.cookies[sessionName]));
-      issue(res, user, token); res.redirect('/');
+      issue(res, user, token); res.redirect(record.return_path || '/');
     } catch { res.redirect('/?authError=' + encodeURIComponent('飞书身份获取失败，请稍后重试或联系管理员检查配置')); }
   });
   return { getUser, documentToken(req) { const record = documentTokens.get(hash(req.cookies[sessionName] || '')); return record && record.expires > Date.now() ? record.token : null; } };

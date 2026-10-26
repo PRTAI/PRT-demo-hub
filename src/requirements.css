@@ -1,4 +1,25 @@
 .requirement-form{max-width:900px}
+.requirement-date-fields,.requirement-owner-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.requirement-date-fields .field{display:block;min-width:0}
+.requirement-date-fields .field small{display:block;line-height:1.7;margin-top:8px;color:#89967f;font-size:11px}
+.requirement-owner-fields{margin-top:8px}
+.requirement-owner-picker{min-width:0;margin:0;padding:14px;border:1px solid #dfe8d5;border-radius:12px;background:#f8fbf4}
+.requirement-owner-picker legend{padding:0 7px;font-weight:600;color:#587348;font-size:13px}
+.requirement-owner-picker legend span{margin-left:8px;color:#93a087;font-size:10px;font-weight:400}
+.requirement-owner-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px;color:#89967f;font-size:11px}
+.requirement-owner-heading strong{font-size:11px;color:#69845a}
+.requirement-owner-picker .search-box{max-width:none;min-width:0;margin-bottom:12px;background:#fff}
+.requirement-owner-options{display:grid;gap:7px;max-height:290px;overflow:auto;padding-right:3px}
+.requirement-owner-options>label{display:flex;align-items:center;gap:10px;padding:11px;border:1px solid #e1e9da;border-radius:8px;background:#fff;cursor:pointer;min-width:0}
+.requirement-owner-options>label:has(input:checked){border-color:#afc79c;background:#eff6e8}
+.requirement-owner-options input{width:16px;height:16px;flex:none;margin:0}
+.requirement-owner-options>label>span{min-width:0;font-size:12px;color:#5e754f;overflow-wrap:anywhere}
+.requirement-owner-options small{display:block;margin-top:4px;font-size:10px;color:#93a087}
+.requirement-owner-options>.muted{padding:8px;font-size:12px}
+.requirement-owner-hint{color:#8e9d83;font-size:11px;line-height:1.8;margin:12px 0 24px}
+.requirement-owner-summary{margin:10px 0}
+.requirement-owner-summary .requirement-responsible{margin:7px 0}
+@media(max-width:700px){.requirement-date-fields,.requirement-owner-fields{grid-template-columns:minmax(0,1fr)}}
 .requirement-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .requirement-forward>.muted{font-size:12px;line-height:1.8;margin-bottom:14px}
 .requirement-forward-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
@@ -20,6 +41,9 @@
 .requirement-status.needs_update{background:#fff0da;color:#a97127}
 .requirement-status.delivered{background:#e5f3f0;color:#2b7d71}
 .requirements-panel{overflow:visible}
+.requirement-list-hint{padding:0 24px 16px;color:#89967f;font-size:11px;line-height:1.8}
+.requirement-wiki-link{display:inline-flex;align-items:center;gap:6px;margin-top:12px;color:#39735c;font-size:12px;text-decoration:underline;text-underline-offset:3px}
+.requirement-wiki>strong{display:flex;align-items:center;gap:7px}
 .status-menu{position:relative;min-width:150px}
 .status-menu-trigger{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;min-height:40px;padding:7px 12px;border:1px solid #dce6d3;border-radius:10px;background:#fff;color:#587148;font-size:12px;transition:border-color .2s,box-shadow .2s}
 .status-menu-trigger:hover,.status-menu.open .status-menu-trigger{border-color:#89aa77;box-shadow:0 0 0 3px #89aa771a}
@@ -47,9 +71,23 @@
 .requirement-row .requirement-title{text-align:left}
 .requirement-row .requirement-title:hover strong{color:#245a46}
 .requirement-list-main{min-width:0}
+.requirement-responsible{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:12px 0;color:#728565;font-size:12px;overflow-wrap:anywhere}
+.requirement-responsible>svg{flex:none}
+.requirement-person{max-width:100%;padding:3px 9px;border:1px solid #dce8d2;border-radius:20px;background:#f4f8ee;color:#587348}
+.requirement-calendar{margin:20px 0;padding:16px;border:1px solid #dfe8d5;border-radius:10px;background:#f7faf3;color:#647958;font-size:12px}
+.requirement-calendar>div{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.requirement-calendar p{line-height:1.8;margin:10px 0}
+.requirement-calendar .requirement-calendar-error{color:#ab6f38}
 .requirement-list-main strong{font-size:16px;color:#435c37;overflow-wrap:anywhere}
 .requirement-list-main p{font-size:12px;line-height:1.8;color:#89967f;margin:10px 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .requirement-list-main small{font-size:11px;color:#99a28e}
+.requirement-list-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;line-height:1.8}
+.requirement-deadline{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;padding:5px 10px;border:1px solid #d99b05;border-radius:7px;background:#ffeb8a;color:#784200;font-size:12px;font-weight:700;box-shadow:0 1px 3px #b882001a}
+.requirement-deadline>svg{flex:none}
+.requirement-deadline-note{padding-left:7px;border-left:1px solid currentColor;font-size:11px}
+.requirement-deadline.urgent,.requirement-deadline.overdue{border-color:#dc3b35;background:#ffe0dc;color:#b42318;animation:requirement-deadline-pulse 1.6s ease-in-out infinite}
+@keyframes requirement-deadline-pulse{0%,100%{background:#ffe0dc;box-shadow:0 0 0 0 #dc3b3533}50%{background:#ffbdb5;box-shadow:0 0 0 4px #dc3b351a}}
+@media(prefers-reduced-motion:reduce){.requirement-deadline.urgent,.requirement-deadline.overdue{animation:none}}
 .requirement-count{display:flex;align-items:center;gap:8px;font-size:11px;color:#7d936d;white-space:nowrap}
 .requirement-demos{margin-bottom:30px}
 .requirement-demos .panel-title{flex-wrap:wrap}
@@ -117,3 +155,8 @@
   .requirement-title h2{font-size:18px}
   .requirement-assignees>div{grid-template-columns:1fr}
 }
+.requirement-export-progress { margin: 0 0 18px; padding: 16px 18px; border: 1px solid #c9d9ce; border-radius: 12px; background: #f3f8f4; color: #31483a; }
+.requirement-export-progress p { margin: 8px 0; font-size: 13px; line-height: 1.7; }
+.requirement-export-progress details { margin: 12px 0; font-size: 13px; }
+.requirement-export-progress li { margin: 6px 0; overflow-wrap: anywhere; }
+.requirement-export-progress .requirement-actions { flex-wrap: wrap; justify-content: flex-start; margin-top: 12px; }

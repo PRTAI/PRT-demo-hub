@@ -17,7 +17,7 @@ test('old requirement schema migrates all relations and supports four statuses w
   const legacy = new DatabaseSync(path.join(root, 'platform.sqlite'));
   legacy.exec(`PRAGMA foreign_keys=OFF; BEGIN;
     CREATE TABLE requirements_legacy (id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,category TEXT NOT NULL DEFAULT '',status TEXT NOT NULL CHECK(status IN ('open','closed')),publisher_id TEXT NOT NULL REFERENCES users(id),revision INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-    INSERT INTO requirements_legacy SELECT * FROM requirements; DROP TABLE requirements;
+    INSERT INTO requirements_legacy SELECT id,title,content,category,status,publisher_id,revision,created_at,updated_at FROM requirements; DROP TABLE requirements;
     ALTER TABLE requirements_legacy RENAME TO requirements; COMMIT;`);
   legacy.close();
   store = openStore(root);
@@ -29,4 +29,31 @@ test('old requirement schema migrates all relations and supports four statuses w
   for (const status of ['needs_update', 'delivered', 'closed', 'open']) store.run('UPDATE requirements SET status=? WHERE id=?', status, before[0].id);
   assert.deepEqual(store.all('PRAGMA foreign_key_check'), []);
   assert.equal(store.one("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='requirements_updated'").count, 1);
+});
+
+test('legacy owners migrate into durable responsibility groups without losing assignments or existing dates', testContext => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-owner-migration-'));
+  let store = openStore(root); seedPreview(store);
+  const requirement = store.one('SELECT id FROM requirements');
+  store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['business', 'employee']), 'preview-colleague');
+  for (const id of ['preview-business', 'preview-admin', 'preview-unassigned']) store.run('INSERT OR IGNORE INTO requirement_assignees(requirement_id,user_id,assigned_by,created_at) VALUES(?,?,?,?)', requirement.id, id, 'preview-pm', '2028-02-28T00:00:00Z');
+  store.run('UPDATE requirements SET planned_date=? WHERE id=?', '2028-02-28', requirement.id);
+  const before = store.all('SELECT requirement_id,user_id,assigned_by,created_at FROM requirement_assignees ORDER BY requirement_id,user_id');
+  store.db.close();
+  const legacy = new DatabaseSync(path.join(root, 'platform.sqlite'));
+  legacy.exec(`PRAGMA foreign_keys=OFF; BEGIN;
+    CREATE TABLE requirement_assignees_legacy(requirement_id TEXT NOT NULL REFERENCES requirements(id),user_id TEXT NOT NULL REFERENCES users(id),assigned_by TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,PRIMARY KEY(requirement_id,user_id));
+    INSERT INTO requirement_assignees_legacy SELECT requirement_id,user_id,assigned_by,created_at FROM requirement_assignees;
+    DROP TABLE requirement_assignees; ALTER TABLE requirement_assignees_legacy RENAME TO requirement_assignees;
+    ALTER TABLE requirements DROP COLUMN deadline_date; COMMIT;`);
+  legacy.close(); store = openStore(root);
+  testContext.after(() => { store.db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  assert.deepEqual(store.all('SELECT requirement_id,user_id,assigned_by,created_at FROM requirement_assignees ORDER BY requirement_id,user_id'), before);
+  for (const [id, group] of [['preview-business', 'business'], ['preview-colleague', 'both'], ['preview-employee', 'development'], ['preview-admin', 'development'], ['preview-unassigned', 'development']]) assert.equal(store.one('SELECT responsibility FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, id).responsibility, group);
+  assert.equal(store.one('SELECT planned_date FROM requirements WHERE id=?', requirement.id).planned_date, '2028-02-28');
+  assert.equal(store.one('SELECT deadline_date FROM requirements WHERE id=?', requirement.id).deadline_date, '');
+  store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['employee']), 'preview-business');
+  store.db.close(); store = openStore(root);
+  assert.equal(store.one('SELECT responsibility FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-business').responsibility, 'business');
+  assert.deepEqual(store.all('PRAGMA foreign_key_check'), []);
 });

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { uid, now } from './db.mjs';
+import { defaultResponsibility } from '../shared/requirement-owners.mjs';
 
 export function seedPreview(store) {
   const { one, run, tx } = store;
@@ -21,7 +22,7 @@ export function seedPreview(store) {
     for (const [id, name, roles, supervisor] of users) run('INSERT INTO users(id,open_id,name,roles,supervisor_id,created_at) VALUES(?,?,?,?,?,?)', id, 'preview:' + id, name, JSON.stringify(roles), supervisor, now());
     const requirementId = uid();
     run("INSERT INTO requirements(id,title,content,category,status,publisher_id,created_at,updated_at) VALUES(?,?,?,?,'open',?,?,?)", requirementId, '企业业务分析演示样例', '准备可复用的合成数据，支持零售、金融、工业等业务场景的分析和演示。仅用于功能体验。', '通用数据', 'preview-pm', now(), now());
-    for (const [id] of users.filter(user => user[0] !== 'preview-unassigned')) run('INSERT INTO requirement_assignees VALUES(?,?,?,?)', requirementId, id, 'preview-pm', now());
+    for (const [id, name, roles] of users.filter(user => user[0] !== 'preview-unassigned')) run('INSERT INTO requirement_assignees(requirement_id,user_id,assigned_by,created_at,responsibility) VALUES(?,?,?,?,?)', requirementId, id, 'preview-pm', now(), defaultResponsibility(roles));
     const samples = [
       ['零售门店销售分析', '覆盖门店、商品与交易的完整分析样例，支持销售趋势和经营看板演示。', '零售与消费', ['经营分析', '多表关联'], 'published', 'preview-employee', 'retail_sales.csv'],
       ['银行客户分群数据集', '面向客户画像与分群场景，包含客户基础属性及行为特征。', '金融服务', ['客户画像', '分群'], 'pending', 'preview-colleague', 'customer_segments.json'],

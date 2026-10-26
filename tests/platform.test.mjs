@@ -7,6 +7,7 @@ import request from 'supertest';
 import { createApp } from '../server/app.mjs';
 import { createBackup } from '../scripts/backup.mjs';
 import { restoreBackup } from '../scripts/restore.mjs';
+import ExcelJS from 'exceljs';
 
 const origin = 'http://127.0.0.1:5173';
 async function fixture(t, options = {}) {
@@ -204,16 +205,17 @@ test('selected reviewer keeps access independently from the employee directory s
   await employee.get('/assets/' + a.id).expect(404);
   const newOwner = await f.login('preview-other'); const updated = await detail(newOwner, a.id); assert.equal(updated.creator.id, 'preview-employee'); assert.equal(updated.owner.id, 'preview-other');
 });
-test('upload limits and empty files never become version files', async t => {
+test('Demo uploads and submission ignore stored size limits while enforcing file count and rejecting empty files', async t => {
   const f = await fixture(t), admin = await f.login('preview-admin'), employee = await f.login('preview-employee');
   const conf = (await admin.get('/config')).body; await admin.send('put', '/admin/settings', { ...conf, maxFileMB: 1, maxVersionMB: 1, maxFiles: 1 }).expect(200);
   const a = await create(employee);
-  await employee.upload(a.versionId, 0, 'large.zip', Buffer.alloc(1048577)).expect(400);
   await employee.upload(a.versionId, 0, 'empty.zip', Buffer.alloc(0)).expect(400);
   assert.equal((await detail(employee, a.id)).latest.files.length, 0);
-  await employee.upload(a.versionId, 0, '../../escaped.txt').expect(201);
+  await employee.upload(a.versionId, 0, 'large.zip', Buffer.alloc(1048577)).expect(201);
   await employee.upload(a.versionId, 1, 'another.txt').expect(400);
   assert.equal((await detail(employee, a.id)).latest.files.length, 1);
+  assert.equal((await detail(employee, a.id)).latest.files[0].size, 1048577);
+  assert.equal((await action(employee, a.versionId, 1, 'submit')).status, 200);
   assert.equal(fs.readdirSync(path.join(f.root, 'data', 'tmp')).length, 0);
 });
 test('missing supervisor and incomplete explanation block submission', async t => {
@@ -944,7 +946,7 @@ test('binding edits are atomic and reject stale asset revisions or invalid requi
 
 test('requirement bindings persist through backup, restore and Demo version creation', async t => {
   const ctx = await fixture(t), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm');
-  const requirement = await publishRequirement(pm), demo = (await manager.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  const requirement = await publishRequirement(pm, { businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee'], publishDate: '2028-02-28', deadlineDate: '2028-02-29' }), demo = (await manager.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
   const document = await requirementUpload(pm, requirement.id);
   await manager.upload(demo.versionId, 0, 'data.csv', Buffer.from('id,value\n1,2')).expect(201);
   assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
@@ -957,7 +959,9 @@ test('requirement bindings persist through backup, restore and Demo version crea
   try {
     assert.equal(restored.store.one('SELECT title FROM requirements WHERE id=?', requirement.id).title, requirement.title);
     assert.equal(restored.store.one('SELECT requirement_id FROM asset_requirements WHERE asset_id=?', demo.id).requirement_id, requirement.id);
-    assert.equal(restored.store.one('SELECT user_id FROM requirement_assignees WHERE requirement_id=?', requirement.id).user_id, 'preview-employee');
+    assert.deepEqual(restored.store.all('SELECT user_id,responsibility FROM requirement_assignees WHERE requirement_id=? ORDER BY user_id', requirement.id).map(user => ({ ...user })), [{ user_id: 'preview-business', responsibility: 'business' }, { user_id: 'preview-employee', responsibility: 'development' }]);
+    const dates = restored.store.one('SELECT planned_date,deadline_date FROM requirements WHERE id=?', requirement.id);
+    assert.equal(dates.planned_date, '2028-02-28'); assert.equal(dates.deadline_date, '2028-02-29');
     assert.equal(restored.store.one('SELECT file_id FROM requirement_files WHERE requirement_id=?', requirement.id).file_id, document.body.id);
     assert.equal(fs.readFileSync(path.join(restorePath, 'files', document.body.id), 'utf8'), 'requirement document');
     assert.equal(restored.store.one('PRAGMA foreign_key_check'), undefined);
@@ -997,6 +1001,7 @@ test('Feishu sends requirement snapshots to business publishers and retries publ
   await manager.upload(demo.versionId, 0).expect(201);
   await action(manager, demo.versionId, 1, 'publish').then(result => assert.equal(result.status, 200));
   await business.send('put', `/requirements/${requirement.id}`, { ...requirementContent, title: '发布后的新需求标题', revision: 0 }).expect(200);
+  ctx.store.run("DELETE FROM notifications WHERE kind='requirement_publish'");
   const { createNotifications } = await import('../server/notifications.mjs');
   ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
   const calls = [];
@@ -1046,6 +1051,7 @@ test('queued business notifications are skipped when accounts, roles or requirem
   ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['employee']), 'preview-other-manager');
   const asset = await detail(pm, demo.id);
   await thirdBusiness.send('delete', `/requirements/${third.id}/demos/${demo.id}`, { revision: asset.revision }).expect(200);
+  ctx.store.run("DELETE FROM notifications WHERE kind='requirement_publish'");
   const { createNotifications } = await import('../server/notifications.mjs');
   ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
   const calls = [];
@@ -1059,4 +1065,532 @@ test('queued business notifications are skipped when accounts, roles or requirem
     assert.equal(job.status, 'skipped'); assert.equal(job.attempts, 0);
   }
   assert.deepEqual(new Set(calls.map(message => message.receive_id)), new Set(['ou_mock_preview-manager', 'ou_mock_preview-pm']));
+});
+
+test('requirement search matches multiple responsible people without duplicate rows and preserves visibility and literal wildcards', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  ctx.store.run('DELETE FROM requirement_assignees');
+  ctx.store.run('UPDATE users SET name=? WHERE id=?', '测试负责人_%甲', 'preview-employee');
+  ctx.store.run('UPDATE users SET name=? WHERE id=?', '测试负责人_%乙', 'preview-colleague');
+  const first = await publishRequirement(pm, { assignedUserIds: ['preview-employee', 'preview-colleague'] });
+  const second = await publishRequirement(pm, { assignedUserIds: ['preview-colleague'] });
+  const third = await publishRequirement(pm, { assignedUserIds: ['preview-other'] });
+  const query = new URLSearchParams({ q: '测试负责人_%', pageSize: '1' });
+  const page = (await pm.get('/requirements?' + query).expect(200)).body;
+  assert.equal(page.total, 2); assert.equal(page.pages, 2); assert.equal(page.items.length, 1);
+  const next = (await pm.get('/requirements?' + query + '&page=2').expect(200)).body;
+  assert.deepEqual(new Set([page.items[0].id, next.items[0].id]), new Set([first.id, second.id]));
+  const visible = (await employee.get('/requirements?q=' + encodeURIComponent('测试负责人_%')).expect(200)).body;
+  assert.equal(visible.total, 1); assert.equal(visible.items[0].id, first.id);
+  assert.equal(visible.items[0].assignedUsers.length, 2);
+  assert.equal((await pm.get('/requirements?q=' + encodeURIComponent('%')).expect(200)).body.total, 2);
+  assert.equal((await pm.get('/requirements?q=' + encodeURIComponent("' OR 1=1 --")).expect(200)).body.total, 0);
+  await pm.send('post', `/requirements/${third.id}/forward`, { revision: 0, assignedUserIds: ['preview-colleague'] }).expect(200);
+  assert.equal((await pm.get('/requirements?' + query).expect(200)).body.total, 3);
+});
+
+test('requirements put closed items last before pagination and preserve search, assignment visibility and status filters', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const items = [];
+  for (const [status, updatedAt, assignee] of [
+    ['closed', '2025-01-06T00:00:00Z', 'preview-employee'],
+    ['open', '2025-01-01T00:00:00Z', 'preview-employee'],
+    ['needs_update', '2025-01-02T00:00:00Z', 'preview-employee'],
+    ['delivered', '2025-01-03T00:00:00Z', 'preview-employee'],
+    ['closed', '2025-01-04T00:00:00Z', 'preview-employee'],
+    ['open', '2025-01-05T00:00:00Z', 'preview-other']
+  ]) {
+    const item = await publishRequirement(pm, { title: `排序验收需求-${items.length}`, assignedUserIds: [assignee] });
+    ctx.store.run('UPDATE requirements SET status=?,updated_at=? WHERE id=?', status, updatedAt, item.id);
+    items.push(item);
+  }
+  const query = '/requirements?q=' + encodeURIComponent('排序验收需求-');
+  const actual = [];
+  for (let page = 1; page <= 3; page++) {
+    const result = (await pm.get(`${query}&pageSize=2&page=${page}`).expect(200)).body;
+    assert.equal(result.total, 6); assert.equal(result.pages, 3);
+    actual.push(...result.items.map(item => item.id));
+  }
+  assert.deepEqual(actual, [5, 3, 2, 1, 0, 4].map(index => items[index].id));
+  const mine = (await employee.get(query + '&assigned=1').expect(200)).body;
+  assert.equal(mine.total, 5);
+  assert.deepEqual(mine.items.map(item => item.id), [3, 2, 1, 0, 4].map(index => items[index].id));
+  assert.deepEqual((await pm.get(query + '&status=closed').expect(200)).body.items.map(item => item.id), [items[0].id, items[4].id]);
+  await pm.send('post', `/requirements/${items[0].id}/actions`, { revision: 0, action: 'set_status', status: 'open' }).expect(200);
+  assert.equal((await employee.get(query).expect(200)).body.items[0].id, items[0].id);
+});
+
+test('requirement deadlines sort globally before pagination, put missing dates behind dated items and keep closed items last', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const items = [];
+  for (const [status, deadline, updatedAt, assignee] of [
+    ['closed', '2028-01-01', '2025-01-06', 'preview-employee'],
+    ['open', '2028-01-03', '2025-01-01', 'preview-employee'],
+    ['needs_update', '2028-01-02', '2025-01-02', 'preview-employee'],
+    ['delivered', '', '2025-01-03', 'preview-employee'],
+    ['closed', '2028-01-02', '2025-01-04', 'preview-employee'],
+    ['open', '2028-01-02', '2025-01-05', 'preview-other'],
+    ['open', '2027-01-01', '2025-01-06', 'preview-employee'],
+    ['open', '', '2025-01-02', 'preview-employee']
+  ]) {
+    const item = await publishRequirement(pm, { title: `截止排序需求-${items.length}`, publishDate: '2026-01-01', deadlineDate: deadline, assignedUserIds: [assignee] });
+    ctx.store.run('UPDATE requirements SET status=?,updated_at=? WHERE id=?', status, updatedAt + 'T00:00:00Z', item.id);
+    items.push(item);
+  }
+  const query = '/requirements?q=' + encodeURIComponent('截止排序需求-'), actual = [];
+  for (let page = 1; page <= 4; page++) {
+    const result = (await pm.get(`${query}&pageSize=2&page=${page}`).expect(200)).body;
+    assert.equal(result.total, 8); actual.push(...result.items.map(item => item.id));
+  }
+  assert.deepEqual(actual, [6, 5, 2, 1, 3, 7, 0, 4].map(index => items[index].id));
+  assert.deepEqual((await employee.get(query).expect(200)).body.items.map(item => item.id), [6, 2, 1, 3, 7, 0, 4].map(index => items[index].id));
+  assert.deepEqual((await pm.get(query + '&status=closed').expect(200)).body.items.map(item => item.id), [items[0].id, items[4].id]);
+});
+
+test('only PMs export requirements and the workbook uses dedicated wiki URLs and the exact current filters across pages', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), business = await ctx.login('preview-business'), other = await ctx.login('preview-other'), admin = await ctx.login('preview-admin'), supervisor = await ctx.login('preview-other-manager');
+  const first = await publishRequirement(pm, { title: '表格导出验收-近', publishDate: '2028-01-01', deadlineDate: '2028-01-02', businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee'] });
+  const second = await publishRequirement(pm, { title: '表格导出验收-远', publishDate: '2028-01-01', deadlineDate: '2028-02-01', assignedUserIds: ['preview-pm'] });
+  const noDemo = await publishRequirement(pm, { title: '表格导出验收-无日期', assignedUserIds: ['preview-employee'] });
+  const link = 'https://team.feishu.cn/docx/DemoExport';
+  const wikiUrl = 'https://team.feishu.cn/wiki/PublishedRequirement';
+  ctx.store.run("UPDATE requirement_wiki SET url=?,status='synced' WHERE requirement_id=?", wikiUrl, first.id);
+  const firstDemo = (await employee.send('post', '/assets', { description: { ...description, title: '=导出 Demo A', content: `[飞书说明](${link})`, notes: '私密备注' }, requirementIds: [first.id] }).expect(201)).body;
+  await employee.send('post', '/assets', { description: { ...description, title: '导出 Demo B', content: '没有飞书文档链接' }, requirementIds: [first.id] }).expect(201);
+  await other.send('post', '/assets', { description: { ...description, title: '其他人的 Demo', content: 'https://team.feishu.cn/docx/HiddenDemo' }, requirementIds: [first.id] }).expect(201);
+  await other.send('post', '/assets', { description: { ...description, title: '无权查看的需求 Demo' }, requirementIds: [second.id] }).expect(201);
+  async function exported(client, query) {
+    const result = await client.get('/requirements/export.xlsx?' + query).buffer(true).parse((res, callback) => {
+      const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => callback(null, Buffer.concat(chunks))); res.on('error', callback);
+    }).expect(200);
+    assert.match(result.headers['content-type'], /application\/vnd.openxmlformats-officedocument.spreadsheetml.sheet/);
+    assert.match(result.headers['content-disposition'], /attachment;.*\.xlsx/);
+    const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(result.body);
+    return workbook.worksheets[0];
+  }
+  const query = 'q=' + encodeURIComponent('表格导出验收-') + '&pageSize=1&page=2';
+  const sheet = await exported(pm, query);
+  assert.equal(sheet.columnCount, 4); assert.equal(sheet.rowCount, 6);
+  assert.deepEqual(sheet.getRow(1).values.slice(1), ['截止日期', 'demo名称', '关联人员', 'demo的飞书文档超链接']);
+  assert.equal(sheet.getCell('A2').value.toISOString().slice(0, 10), '2028-01-02');
+  assert.equal(sheet.getCell('A5').value.toISOString().slice(0, 10), '2028-02-01');
+  assert.equal(sheet.getCell('A6').value, null); assert.equal(sheet.getCell('B6').text, '');
+  const firstRow = [2, 3, 4].find(number => sheet.getCell(`B${number}`).text === '=导出 Demo A');
+  assert.ok(firstRow); assert.equal(sheet.getCell(`D${firstRow}`).hyperlink, wikiUrl);
+  for (const number of [2, 3, 4]) assert.equal(sheet.getCell(`D${number}`).hyperlink, wikiUrl);
+  assert.equal(sheet.getCell(`B${firstRow}`).formula, undefined);
+  assert.match(sheet.getCell(`C${firstRow}`).text, /商务同事/); assert.match(sheet.getCell(`C${firstRow}`).text, /陈思远/);
+  for (const client of [employee, business, other, admin, supervisor]) {
+    await client.get('/requirements/export.xlsx?' + query).expect(403);
+    assert.equal((await client.get('/requirements').expect(200)).body.canExport, false);
+  }
+  assert.equal((await pm.get('/requirements').expect(200)).body.canExport, true);
+  assert.equal((await exported(pm, query + '&assigned=1')).rowCount, 2);
+  assert.equal((await exported(pm, query + '&status=closed')).rowCount, 1);
+  ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", second.id);
+  assert.equal((await exported(pm, query + '&status=open')).rowCount, 5);
+  const closed = await exported(pm, query + '&status=closed');
+  assert.equal(closed.rowCount, 2); assert.equal(closed.getCell('B2').text, '无权查看的需求 Demo');
+  assert.equal((await exported(pm, 'q=' + encodeURIComponent('商务同事'))).getCell('A2').value.toISOString().slice(0, 10), '2028-01-02');
+  await pm.get('/requirements/export.xlsx?status=invalid').expect(400);
+  await request(ctx.app).get('/api/requirements/export.xlsx').expect(401);
+  assert.equal((await pm.get(`/requirements/${noDemo.id}`).expect(200)).body.demos.length, 0);
+  assert.equal((await employee.get(`/assets/${firstDemo.id}`).expect(200)).body.latest.description.title, '=导出 Demo A');
+});
+
+test('prepared exports freeze the selected filter scope, restrict job access and block downloads until all document syncs succeed', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), business = await ctx.login('preview-business'), manager = await ctx.login('preview-manager'), admin = await ctx.login('preview-admin');
+  const first = await publishRequirement(pm, { title: '历史导出批次-甲', publishDate: '2028-01-01', deadlineDate: '2028-01-02', assignedUserIds: ['preview-pm'] });
+  const second = await publishRequirement(pm, { title: '历史导出批次-乙', publishDate: '2028-01-01', deadlineDate: '2028-02-01', assignedUserIds: ['preview-employee'] });
+  const excluded = await publishRequirement(pm, { title: '历史导出批次-已关闭' });
+  ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", excluded.id);
+  await employee.send('post', '/assets', { description: { ...description, title: '历史快照 Demo' }, requirementIds: [first.id] }).expect(201);
+  const filters = { q: '历史导出批次-', status: 'open', assigned: '0', page: 2, pageSize: 1 };
+  for (const client of [employee, business, admin]) await client.send('post', '/requirements/exports', filters).expect(403);
+  await request(ctx.app).post('/api/requirements/exports').expect(403);
+  await pm.agent.post('/api/requirements/exports').set('Origin', origin).set('X-Requested-With', 'PRT').send(filters).expect(403);
+  await pm.send('post', '/requirements/exports', { status: 'invalid' }).expect(400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_exports').count, 0);
+  const job = (await pm.send('post', '/requirements/exports', filters).expect(202)).body;
+  assert.equal(job.total, 2); assert.equal(job.status, 'ready'); assert.equal(job.preview, true);
+  assert.deepEqual(job.filters, { q: filters.q, status: 'open', assigned: '0' });
+  await publishRequirement(pm, { title: '历史导出批次-导出后新增' });
+  ctx.store.run("UPDATE requirements SET deadline_date='2028-12-31' WHERE id=?", first.id);
+  for (const client of [employee, business, admin]) {
+    await client.get(`/requirements/exports/${job.id}`).expect(403);
+    await client.get(`/requirements/exports/${job.id}/file.xlsx`).expect(403);
+    await client.send('post', `/requirements/exports/${job.id}/retry`, {}).expect(403);
+  }
+  await manager.get(`/requirements/exports/${job.id}`).expect(404);
+  await manager.get(`/requirements/exports/${job.id}/file.xlsx`).expect(404);
+  await manager.send('post', `/requirements/exports/${job.id}/retry`, {}).expect(404);
+  const own = (await pm.send('post', '/requirements/exports', { ...filters, assigned: '1' }).expect(202)).body;
+  assert.equal(own.total, 1);
+  ctx.store.run('UPDATE requirement_exports SET preview=0 WHERE id=?', job.id);
+  ctx.store.run("UPDATE requirement_export_items SET completed=0,url='' WHERE export_id=?", job.id);
+  ctx.store.run("UPDATE requirement_wiki SET status='pending' WHERE requirement_id=?", first.id);
+  ctx.store.run("UPDATE requirement_wiki SET status='failed',attempts=5,error='飞书文档权限不足' WHERE requirement_id=?", second.id);
+  let progress = (await pm.get(`/requirements/exports/${job.id}`).expect(200)).body;
+  assert.equal(progress.status, 'pending'); assert.equal(progress.failed, 1); assert.equal(progress.pending, 1);
+  await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(409);
+  ctx.store.run("UPDATE requirement_wiki SET status='failed',attempts=5 WHERE requirement_id=?", first.id);
+  progress = (await pm.get(`/requirements/exports/${job.id}`).expect(200)).body;
+  assert.equal(progress.status, 'failed');
+  await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(409);
+  progress = (await pm.send('post', `/requirements/exports/${job.id}/retry`, {}).expect(200)).body;
+  assert.equal(progress.status, 'pending'); assert.equal(progress.failed, 0);
+  for (const [index, id] of [first.id, second.id].entries()) ctx.store.run("UPDATE requirement_wiki SET status='synced',url=? WHERE requirement_id=?", 'https://team.feishu.cn/wiki/Export' + index, id);
+  assert.equal((await pm.get(`/requirements/exports/${job.id}`).expect(200)).body.status, 'ready');
+  const file = await pm.get(`/requirements/exports/${job.id}/file.xlsx`).buffer(true).parse((res, callback) => {
+    const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => callback(null, Buffer.concat(chunks))); res.on('error', callback);
+  }).expect(200);
+  const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(file.body); const sheet = workbook.worksheets[0];
+  assert.equal(sheet.rowCount, 3); assert.equal(sheet.columnCount, 4);
+  assert.equal(sheet.getCell('A2').value.toISOString().slice(0, 10), '2028-01-02');
+  assert.equal(sheet.getCell('B2').text, '历史快照 Demo');
+  assert.equal(sheet.getCell('D2').hyperlink, 'https://team.feishu.cn/wiki/Export0');
+  assert.equal(sheet.getCell('D3').hyperlink, 'https://team.feishu.cn/wiki/Export1');
+  ctx.store.run("UPDATE users SET roles='[\"employee\"]' WHERE id='preview-pm'");
+  await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(403);
+});
+
+test('Demo uploads, saved descriptions, workflow and bindings queue all linked wiki updates without blocking uploads or backfilling history', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager');
+  const first = await publishRequirement(pm, { assignedUserIds: ['preview-employee'] });
+  const second = await publishRequirement(pm, { assignedUserIds: ['preview-employee'] });
+  const unrelated = await publishRequirement(pm);
+  const ids = [first.id, second.id];
+  async function queued(operation, affected = ids) {
+    ctx.store.run("UPDATE requirement_wiki SET status='synced'");
+    const before = ctx.store.all('SELECT requirement_id,generation FROM requirement_wiki');
+    const result = await operation();
+    for (const row of before) {
+      const next = ctx.store.one('SELECT generation,status FROM requirement_wiki WHERE requirement_id=?', row.requirement_id);
+      if (affected.includes(row.requirement_id)) { assert.equal(next.status, 'pending'); assert.ok(next.generation > row.generation); }
+      else { assert.equal(next.status, 'synced'); assert.equal(next.generation, row.generation); }
+    }
+    return result;
+  }
+  const demo = (await queued(() => employee.send('post', '/assets', { description, requirementIds: ids }).expect(201))).body;
+  const revision = () => ctx.store.one('SELECT revision FROM versions WHERE id=?', demo.versionId).revision;
+  const assetRevision = () => ctx.store.one('SELECT revision FROM assets WHERE id=?', demo.id).revision;
+  const queuedAction = (client, value, reason = '') => queued(() => client.send('post', `/versions/${demo.versionId}/actions`, { revision: revision(), action: value, reason }).expect(200));
+  const file = (await queued(() => employee.upload(demo.versionId, revision()).expect(201))).body;
+  await queued(() => employee.send('put', `/versions/${demo.versionId}`, { revision: revision(), description: { ...description, notes: '同步注意事项' } }).expect(200));
+  const beforeConflict = ctx.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', first.id).generation;
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 0, description }).expect(409);
+  assert.equal(ctx.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', first.id).generation, beforeConflict);
+  await queued(() => employee.send('delete', `/versions/${demo.versionId}/files/${file.id}`, { revision: revision() }).expect(200));
+  await queued(() => employee.upload(demo.versionId, revision()).expect(201));
+  await queuedAction(employee, 'submit');
+  await queuedAction(manager, 'reject', '待更新说明');
+  await queuedAction(employee, 'submit');
+  await queuedAction(manager, 'publish');
+  await queuedAction(manager, 'unpublish', '下架测试');
+  await queuedAction(manager, 'restore', '恢复测试');
+  const next = (await queued(() => employee.send('post', `/assets/${demo.id}/versions`, { revision: assetRevision(), baseVersionId: demo.versionId }).expect(201))).body;
+  await queued(() => employee.send('delete', `/versions/${next.versionId}`, { revision: 0 }).expect(200));
+  await queued(() => pm.send('delete', `/requirements/${first.id}/demos/${demo.id}`, { revision: assetRevision() }).expect(200));
+  await queued(() => pm.send('post', `/requirements/${first.id}/demos`, { assetId: demo.id, revision: assetRevision() }).expect(200));
+  const draft = (await employee.send('post', '/assets', { description, requirementIds: ids }).expect(201)).body;
+  await queued(() => employee.send('delete', `/versions/${draft.versionId}`, { revision: 0 }).expect(200));
+  assert.equal(ctx.store.one('SELECT id FROM assets WHERE id=?', draft.id), undefined);
+  const history = ctx.store.one('SELECT r.id FROM requirements r LEFT JOIN requirement_wiki w ON w.requirement_id=r.id WHERE w.requirement_id IS NULL').id;
+  const historicalDemo = (await queued(() => employee.send('post', '/assets', { description, requirementIds: [history] }).expect(201), [])).body;
+  await queued(() => employee.upload(historicalDemo.versionId, 0).expect(201), []);
+  assert.equal(ctx.requirementWiki.info(history).status, 'not_created'); assert.equal(ctx.requirementWiki.info(unrelated.id).status, 'synced');
+});
+
+test('requirement wiki jobs follow publication, attachment uploads, forwarding and account changes with restricted sync endpoints', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee'), other = await ctx.login('preview-other'), admin = await ctx.login('preview-admin');
+  const history = ctx.store.one('SELECT id FROM requirements').id;
+  assert.equal(ctx.requirementWiki.info(history).status, 'not_created');
+  let requirement = await publishRequirement(pm, { title: '飞书协作文档需求', content: '平台原有完整输入内容应保留。', assignedUserIds: ['preview-employee'] });
+  assert.equal(requirement.content, '平台原有完整输入内容应保留。'); assert.equal(requirement.wiki.status, 'pending');
+  const job = () => ctx.store.one('SELECT * FROM requirement_wiki WHERE requirement_id=?', requirement.id);
+  assert.equal(job().generation, 1);
+  assert.equal((await employee.get(`/requirements/${requirement.id}/wiki`).expect(200)).body.status, 'pending');
+  await other.get(`/requirements/${requirement.id}/wiki`).expect(403);
+  await employee.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(403);
+  await pm.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(409);
+  await requirementUpload(pm, requirement.id, Buffer.from('doc contents'), '需求.pdf');
+  assert.equal(job().generation, 2);
+  requirement = (await pm.get(`/requirements/${requirement.id}`).expect(200)).body;
+  requirement = (await business.send('post', `/requirements/${requirement.id}/forward`, { revision: requirement.revision, assignedUserIds: ['preview-colleague'] }).expect(200)).body;
+  assert.equal(job().generation, 3);
+  requirement = (await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, title: '更新后的标题', assignedUserIds: ['preview-employee', 'preview-colleague'], revision: requirement.revision }).expect(200)).body;
+  assert.equal(job().generation, 4);
+  const target = ctx.store.one("SELECT * FROM users WHERE id='preview-colleague'");
+  await admin.send('put', '/admin/users/preview-colleague', { revision: target.revision, roles: ['employee'], supervisorId: null, enabled: false }).expect(200);
+  assert.equal(job().generation, 5);
+  for (const client of [pm, business, admin]) {
+    ctx.store.run("UPDATE requirement_wiki SET status='failed',error='权限不足' WHERE requirement_id=?", requirement.id);
+    await client.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(200);
+    assert.equal(job().status, 'pending');
+  }
+  await pm.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(409);
+  await business.get('/admin/requirement-wiki').expect(403);
+  assert.equal((await admin.get('/admin/requirement-wiki').expect(200)).body.length, 1);
+  await pm.send('post', `/requirements/${history}/wiki/retry`, {}).expect(200);
+  assert.equal(ctx.requirementWiki.info(history).status, 'pending');
+  const jobCount = ctx.store.one('SELECT COUNT(*) AS count FROM requirement_wiki').count;
+  await ctx.requirementWiki.drain(); assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_wiki').count, jobCount);
+  await pm.send('post', '/requirements/missing/wiki/retry', {}).expect(404);
+});
+
+test('publishing a requirement atomically queues deduplicated notifications and one calendar task with a valid date', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm');
+  const requirement = await publishRequirement(pm, { plannedDate: '2027-12-31', assignedUserIds: ['preview-pm', 'preview-employee', 'preview-employee', 'preview-colleague'] });
+  const jobs = ctx.store.all('SELECT * FROM notifications WHERE requirement_id=?', requirement.id);
+  assert.equal(jobs.length, 3);
+  assert.deepEqual(new Set(jobs.map(job => job.recipient_id)), new Set(['preview-pm', 'preview-employee', 'preview-colleague']));
+  assert.ok(jobs.every(job => job.kind === 'requirement_publish' && job.version_id === null && job.status === 'pending'));
+  assert.equal(requirement.plannedDate, '2027-12-31'); assert.equal(requirement.calendar.status, 'pending');
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_calendar WHERE requirement_id=?', requirement.id).count, 1);
+  assert.equal(requirement.wiki.status, 'pending');
+  const counts = () => ['requirements', 'notifications', 'requirement_calendar', 'requirement_wiki'].map(table => ctx.store.one(`SELECT COUNT(*) AS count FROM ${table}`).count);
+  const before = counts();
+  for (const plannedDate of ['2027-02-29', '2027-13-01', 'tomorrow']) await pm.send('post', '/requirements', { ...requirementContent, plannedDate }).expect(400);
+  await pm.send('post', '/requirements', { ...requirementContent, assignedUserIds: ['missing'] }).expect(400);
+  assert.deepEqual(counts(), before);
+  const unassigned = await publishRequirement(pm, { assignedUserIds: [] });
+  assert.deepEqual(ctx.store.all('SELECT recipient_id FROM notifications WHERE requirement_id=?', unassigned.id).map(job => job.recipient_id), ['preview-pm']);
+  assert.match(unassigned.plannedDate, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('requirements separate optional owner groups, deduplicate dual roles and preserve read-only access and forwarding', async testContext => {
+  const ctx = await fixture(testContext), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), outsider = await ctx.login('preview-other');
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['business', 'employee']), 'preview-colleague');
+  let requirement = await publishRequirement(pm, { businessUserIds: ['preview-business', 'preview-colleague'], developmentUserIds: ['preview-employee', 'preview-colleague'], publishDate: '2028-02-28', deadlineDate: '2028-02-29' });
+  assert.deepEqual(new Set(requirement.businessOwners.map(user => user.id)), new Set(['preview-business', 'preview-colleague']));
+  assert.deepEqual(new Set(requirement.developmentOwners.map(user => user.id)), new Set(['preview-employee', 'preview-colleague']));
+  assert.equal(requirement.assignedUsers.length, 3);
+  assert.equal(ctx.store.one('SELECT responsibility FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-colleague').responsibility, 'both');
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM notifications WHERE requirement_id=?', requirement.id).count, 4);
+  const readonly = (await employee.get(`/requirements/${requirement.id}`).expect(200)).body;
+  assert.equal(readonly.canManage, false); assert.equal(readonly.canStatusManage, false);
+  await employee.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: 0 }).expect(403);
+  await outsider.get(`/requirements/${requirement.id}`).expect(403);
+  for (const owner of [...requirement.businessOwners, ...requirement.developmentOwners]) {
+    const found = (await pm.get('/requirements?q=' + encodeURIComponent(owner.name)).expect(200)).body.items;
+    assert.equal(found.filter(item => item.id === requirement.id).length, 1);
+  }
+  requirement = (await pm.send('post', `/requirements/${requirement.id}/forward`, { revision: 0, assignedUserIds: ['preview-other'] }).expect(200)).body;
+  assert.ok(requirement.developmentOwners.some(user => user.id === 'preview-other'));
+  assert.equal(requirement.businessOwners.length, 2);
+  await outsider.get(`/requirements/${requirement.id}`).expect(200);
+  const optional = await publishRequirement(pm, { businessUserIds: [], developmentUserIds: [] });
+  assert.deepEqual(optional.businessOwners, []); assert.deepEqual(optional.developmentOwners, []); assert.deepEqual(optional.assignedUsers, []);
+});
+
+test('owner groups validate current roles and account state atomically and retain legacy groups after role changes', async testContext => {
+  const ctx = await fixture(testContext), pm = await ctx.login('preview-pm');
+  ctx.store.run('UPDATE users SET enabled=0 WHERE id=?', 'preview-other');
+  ctx.store.run('UPDATE users SET deleted_at=? WHERE id=?', new Date().toISOString(), 'preview-colleague');
+  const counts = () => ['requirements', 'requirement_assignees', 'notifications', 'requirement_calendar'].map(table => ctx.store.one(`SELECT COUNT(*) AS count FROM ${table}`).count);
+  const before = counts();
+  for (const fields of [
+    { businessUserIds: ['preview-employee'], developmentUserIds: [] },
+    { businessUserIds: [], developmentUserIds: ['preview-business'] },
+    { businessUserIds: [], developmentUserIds: ['preview-other'] },
+    { businessUserIds: [], developmentUserIds: ['preview-colleague'] },
+    { businessUserIds: ['missing'], developmentUserIds: [] }
+  ]) await pm.send('post', '/requirements', { ...requirementContent, ...fields }).expect(400);
+  assert.deepEqual(counts(), before);
+  let requirement = await publishRequirement(pm, { assignedUserIds: ['preview-business', 'preview-admin'] });
+  assert.deepEqual(requirement.businessOwners.map(user => user.id), ['preview-business']);
+  assert.deepEqual(requirement.developmentOwners.map(user => user.id), ['preview-admin']);
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['employee']), 'preview-business');
+  requirement = (await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, businessUserIds: ['preview-business'], developmentUserIds: ['preview-admin'], revision: 0 }).expect(200)).body;
+  assert.deepEqual(requirement.businessOwners.map(user => user.id), ['preview-business']);
+  assert.deepEqual(requirement.developmentOwners.map(user => user.id), ['preview-admin']);
+  const snapshot = ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id);
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, title: '不得部分保存', businessUserIds: ['preview-employee'], developmentUserIds: [], revision: requirement.revision }).expect(400);
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id), snapshot);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_assignees WHERE requirement_id=?', requirement.id).count, 2);
+});
+
+test('publication and deadline dates validate atomically, persist independently and retain legacy plannedDate compatibility', async testContext => {
+  const ctx = await fixture(testContext), pm = await ctx.login('preview-pm');
+  let requirement = await publishRequirement(pm, { publishDate: '2028-02-28', deadlineDate: '2028-02-29' });
+  assert.equal(requirement.publishDate, '2028-02-28'); assert.equal(requirement.plannedDate, requirement.publishDate); assert.equal(requirement.deadlineDate, '2028-02-29');
+  const job = ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+  for (const fields of [
+    { publishDate: '2028-03-01' },
+    { deadlineDate: '2028-02-27' },
+    { publishDate: '2027-02-29' },
+    { deadlineDate: '2028-02-30' },
+    { deadlineDate: 'tomorrow' }
+  ]) await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, ...fields, revision: 0 }).expect(400);
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id), job);
+  assert.equal((await pm.get(`/requirements/${requirement.id}`).expect(200)).body.revision, 0);
+  requirement = (await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, publishDate: '2028-02-29', assignedUserIds: ['preview-employee'], revision: 0 }).expect(200)).body;
+  assert.equal(requirement.deadlineDate, '2028-02-29');
+  requirement = (await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, plannedDate: '2028-03-01', deadlineDate: '', assignedUserIds: ['preview-employee'], revision: 1 }).expect(200)).body;
+  assert.equal(requirement.publishDate, '2028-03-01'); assert.equal(requirement.deadlineDate, '');
+  assert.equal(ctx.store.one('SELECT deadline_date FROM requirements WHERE id=?', requirement.id).deadline_date, '');
+});
+
+test('requirement notification snapshots distinguish owner groups and dates without duplicate recipients', async testContext => {
+  const ctx = await fixture(testContext), pm = await ctx.login('preview-pm');
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['business', 'pm']), 'preview-pm');
+  const requirement = await publishRequirement(pm, { businessUserIds: ['preview-pm'], developmentUserIds: ['preview-pm', 'preview-employee'], publishDate: '2028-02-28', deadlineDate: '2028-02-29' });
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, businessUserIds: ['preview-pm'], developmentUserIds: ['preview-pm', 'preview-employee'], publishDate: '2028-03-01', deadlineDate: '', revision: 0 }).expect(200);
+  ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
+  const calls = [], { createNotifications } = await import('../server/notifications.mjs');
+  const sender = createNotifications(ctx.store, { demoMode: false, appId: 'test', appSecret: 'test', notificationFetch: async (url, options) => {
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    calls.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ code: 0 }) };
+  } });
+  await sender.drain();
+  assert.equal(calls.length, 2); assert.equal(calls.filter(call => call.receive_id === 'ou_mock_preview-pm').length, 1);
+  for (const call of calls) {
+    const text = JSON.parse(call.content).text;
+    assert.ok(text.includes('商务负责人：周亦舒')); assert.ok(text.includes('研发负责人：'));
+    assert.ok(text.includes('陈思远')); assert.ok(text.includes('发布日期：2028-02-28')); assert.ok(text.includes('截止日期：2028-02-29'));
+    assert.ok(!text.includes('2028-03-01'));
+  }
+});
+
+test('new requirement notifications retry with stable IDs and skip revoked, disabled and deleted recipients', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm');
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-pm', 'preview-employee', 'preview-colleague', 'preview-other', 'preview-manager'] });
+  ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
+  ctx.store.run('DELETE FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-colleague');
+  ctx.store.run('UPDATE users SET enabled=0 WHERE id=?', 'preview-other');
+  ctx.store.run('UPDATE users SET deleted_at=? WHERE id=?', new Date().toISOString(), 'preview-manager');
+  const calls = []; let fail = true;
+  const { createNotifications } = await import('../server/notifications.mjs');
+  const sender = createNotifications(ctx.store, { demoMode: false, appId: 'test', appSecret: 'test', notificationFetch: async (url, options) => {
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    const message = JSON.parse(options.body); calls.push(message);
+    const failed = fail && message.receive_id === 'ou_mock_preview-employee';
+    return { ok: !failed, json: async () => ({ code: failed ? 230013 : 0 }) };
+  } });
+  await sender.drain();
+  const pending = ctx.store.one('SELECT * FROM notifications WHERE requirement_id=? AND recipient_id=?', requirement.id, 'preview-employee');
+  assert.equal(pending.status, 'pending'); assert.equal(pending.attempts, 1);
+  for (const id of ['preview-colleague', 'preview-other', 'preview-manager']) assert.equal(ctx.store.one('SELECT status FROM notifications WHERE requirement_id=? AND recipient_id=?', requirement.id, id).status, 'skipped');
+  assert.deepEqual(new Set(calls.map(call => call.receive_id)), new Set(['ou_mock_preview-employee', 'ou_mock_preview-pm']));
+  fail = false; ctx.store.run('UPDATE notifications SET next_at=0'); await sender.drain();
+  const attempts = calls.filter(call => call.receive_id === 'ou_mock_preview-employee');
+  assert.equal(attempts.length, 2); assert.equal(attempts[0].uuid, attempts[1].uuid);
+  const message = JSON.parse(attempts[1].content).text;
+  assert.ok(message.includes('新需求已发布')); assert.ok(message.includes(requirement.title));
+  assert.ok(message.includes('requirement=' + requirement.id)); assert.ok(!message.includes(requirement.content));
+  assert.equal(ctx.store.one('SELECT status FROM notifications WHERE id=?', pending.id).status, 'sent');
+  await sender.drain(); assert.equal(calls.length, 3);
+});
+
+test('publishing a requirement creates one Feishu event with native invitations and separately delivers linked schedule cards to its audience', async t => {
+  const messages = [], calendarCalls = []; let attendees = [];
+  const ctx = await fixture(t, { appId: 'cli_test', appSecret: 'test', calendarFetch: async (url, options) => {
+    const parsed = new URL(url), body = options.body ? JSON.parse(options.body) : undefined;
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    calendarCalls.push({ url: parsed, method: options.method, body });
+    let data;
+    if (parsed.pathname.endsWith('/calendars')) data = { calendar: { calendar_id: 'cal_test' } };
+    else if (parsed.pathname.endsWith('/attendees') && options.method === 'GET') data = { items: attendees, has_more: false };
+    else if (parsed.pathname.endsWith('/attendees') && options.method === 'POST') { attendees = body.attendees; data = { attendees }; }
+    else data = { event: { event_id: 'event_test', app_link: 'https://applink.feishu.cn/client/calendar/event/detail?event_id=event_test' } };
+    return { ok: true, json: async () => ({ code: 0, data }) };
+  }, notificationFetch: async (url, options) => {
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    messages.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ code: 0 }) };
+  } });
+  const pm = await ctx.login('preview-pm');
+  ctx.store.run('DELETE FROM requirement_calendar');
+  const requirement = await publishRequirement(pm, { businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee', 'preview-pm'], publishDate: '2028-02-28', deadlineDate: '2028-02-29' });
+  ctx.store.run("UPDATE users SET open_id='ou_' || id"); ctx.config.demoMode = false;
+  await ctx.notifications.drain();
+  assert.equal(messages.length, 3); assert.ok(messages.every(message => message.msg_type === 'text'));
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM notifications WHERE kind='requirement_calendar'").count, 0);
+  await ctx.requirementCalendar.drain();
+  const event = calendarCalls.find(call => call.url.pathname.endsWith('/events') && call.method === 'POST');
+  assert.deepEqual(event.body.start_time, { date: '2028-02-28' }); assert.deepEqual(event.body.end_time, { date: '2028-03-01' });
+  assert.equal(calendarCalls.find(call => call.url.pathname.endsWith('/attendees') && call.method === 'POST').body.need_notification, true);
+  const audience = new Set(['ou_preview-pm', 'ou_preview-business', 'ou_preview-employee']);
+  assert.deepEqual(new Set(attendees.map(attendee => attendee.user_id)), audience);
+  await ctx.notifications.drain();
+  const cards = messages.filter(message => message.msg_type === 'interactive');
+  assert.equal(cards.length, 3); assert.deepEqual(new Set(cards.map(message => message.receive_id)), audience);
+  const info = (await pm.get(`/requirements/${requirement.id}/calendar`).expect(200)).body;
+  assert.equal(info.status, 'synced'); assert.equal(info.messages.sent, 3); assert.ok(info.appLink.includes('event_test'));
+  await ctx.requirementCalendar.drain(); await ctx.notifications.drain(); assert.equal(messages.length, 6);
+});
+
+test('calendar updates share one event key across edits, forwarding and status changes while the admin queue stays restricted', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), other = await ctx.login('preview-other'), admin = await ctx.login('preview-admin');
+  const requirement = await publishRequirement(pm, { plannedDate: '2028-02-29' });
+  const job = () => ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+  const key = job().event_key;
+  await employee.get(`/requirements/${requirement.id}/calendar`).expect(200);
+  await other.get(`/requirements/${requirement.id}/calendar`).expect(403);
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, assignedUserIds: ['preview-employee'], plannedDate: '2028-03-01', revision: 0 }).expect(200);
+  await pm.send('post', `/requirements/${requirement.id}/forward`, { revision: 1, assignedUserIds: ['preview-colleague'] }).expect(200);
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 2, action: 'set_status', status: 'delivered' }).expect(200);
+  assert.equal(job().generation, 4); assert.equal(job().event_key, key);
+  assert.equal((await employee.get(`/requirements/${requirement.id}`).expect(200)).body.plannedDate, '2028-03-01');
+  await pm.get('/admin/requirement-calendar').expect(403);
+  await employee.send('post', `/admin/requirement-calendar/${requirement.id}/retry`, {}).expect(403);
+  await admin.send('post', `/admin/requirement-calendar/${requirement.id}/retry`, {}).expect(409);
+  ctx.store.run("UPDATE requirement_calendar SET status='failed',attempts=5,error='飞书日历同步失败' WHERE requirement_id=?", requirement.id);
+  await admin.send('post', `/admin/requirement-calendar/${requirement.id}/retry`, {}).expect(200);
+  assert.equal(job().status, 'pending'); assert.equal(job().attempts, 0); assert.equal(job().event_key, key);
+  assert.ok((await admin.get('/admin/requirement-calendar').expect(200)).body.some(item => item.requirement_id === requirement.id));
+  await admin.send('put', '/admin/users/preview-employee', { revision: 0, roles: ['employee'], supervisorId: null, enabled: false }).expect(200);
+  assert.equal(job().generation, 5);
+});
+
+test('business, PM and admin users can retry a failed requirement calendar from its detail without gaining other management access', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), admin = await ctx.login('preview-admin');
+  const employee = await ctx.login('preview-employee'), supervisor = await ctx.login('preview-other-manager'), other = await ctx.login('preview-other');
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-employee', 'preview-other-manager', 'preview-admin'] });
+  const endpoint = `/requirements/${requirement.id}/calendar/retry`;
+  const job = () => ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+  const eventKey = job().event_key, generation = job().generation, notificationCount = ctx.notifications.list().length;
+  ctx.store.run("UPDATE requirement_calendar SET event_id='existing_event',calendar_id='existing_calendar',status='failed',attempts=5,next_at=123,error='飞书日历同步失败' WHERE requirement_id=?", requirement.id);
+  for (const client of [employee, supervisor]) {
+    assert.equal((await client.get(`/requirements/${requirement.id}`).expect(200)).body.canRetryCalendar, false);
+    await client.send('post', endpoint, {}).expect(403);
+  }
+  await other.send('post', endpoint, {}).expect(403);
+  assert.equal(job().status, 'failed'); assert.equal(job().attempts, 5);
+  for (const client of [business, pm, admin]) {
+    assert.equal((await client.get(`/requirements/${requirement.id}`).expect(200)).body.canRetryCalendar, true);
+    const retry = (await client.send('post', endpoint, {}).expect(200)).body;
+    assert.equal(retry.status, 'pending'); assert.equal(retry.error, '');
+    assert.equal(job().attempts, 0); assert.equal(job().next_at, 0); assert.equal(job().event_key, eventKey);
+    assert.equal(job().generation, generation); assert.equal(job().event_id, 'existing_event'); assert.equal(job().calendar_id, 'existing_calendar');
+    await client.send('post', endpoint, {}).expect(409);
+    ctx.store.run("UPDATE requirement_calendar SET status='failed',attempts=5 WHERE requirement_id=?", requirement.id);
+  }
+  assert.equal(ctx.notifications.list().length, notificationCount);
+  assert.equal(ctx.store.one('SELECT revision FROM requirements WHERE id=?', requirement.id).revision, requirement.revision);
+  const events = ctx.store.all("SELECT actor_id,detail FROM events WHERE action='requirement_calendar_retry'");
+  assert.deepEqual(new Set(events.map(event => event.actor_id)), new Set(['preview-business', 'preview-pm', 'preview-admin']));
+  assert.ok(events.every(event => JSON.parse(event.detail).requirementId === requirement.id));
+  for (const client of [business, pm]) {
+    await client.get('/admin/requirement-calendar').expect(403);
+    await client.send('post', `/admin/requirement-calendar/${requirement.id}/retry`, {}).expect(403);
+    await client.get('/admin/users').expect(403);
+    await client.send('post', '/requirements/nonexistent/calendar/retry', {}).expect(404);
+  }
+  ctx.store.run("UPDATE requirement_calendar SET status='synced' WHERE requirement_id=?", requirement.id);
+  await business.send('post', endpoint, {}).expect(409);
+});
+
+test('calendar retry checks live roles and account state and requires CSRF protection', async t => {
+  const ctx = await fixture(t), business = await ctx.login('preview-business');
+  const requirement = await publishRequirement(business, { assignedUserIds: ['preview-business'] }), endpoint = `/requirements/${requirement.id}/calendar/retry`;
+  ctx.store.run("UPDATE requirement_calendar SET status='failed',attempts=5 WHERE requirement_id=?", requirement.id);
+  await business.agent.post('/api' + endpoint).set('Origin', origin).set('X-Requested-With', 'PRT').send({}).expect(403);
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['employee']), 'preview-business');
+  assert.equal((await business.get(`/requirements/${requirement.id}`).expect(200)).body.canRetryCalendar, false);
+  await business.send('post', endpoint, {}).expect(403);
+  ctx.store.run('UPDATE users SET roles=?,enabled=0 WHERE id=?', JSON.stringify(['business']), 'preview-business');
+  await business.send('post', endpoint, {}).expect(403);
+  const job = ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+  assert.equal(job.status, 'failed'); assert.equal(job.attempts, 5);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM events WHERE action='requirement_calendar_retry'").count, 0);
 });
