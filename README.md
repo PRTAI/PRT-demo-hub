@@ -89,3 +89,11 @@ compose.production.yaml  企业正式环境：独立配置和数据卷
 `node_modules/`、`dist/`、真实 `.env`、数据库、上传数据、备份和日志由忽略规则排除。测试目录中的小型 ZIP／CSV 样例是自动测试所需文件，应保留。不要把生产平台的数据卷或导出的 Demo 数据复制进源码仓库。
 
 提交前执行 `npm test`、`npm run build` 和 `git diff --check`，再用 `git status --short` 核对变更。构建生成的 `dist/` 无需提交，Docker 构建时会重新生成。
+
+## Harness 共用飞书应用接入
+
+与 Harness 使用同一飞书应用（相同 `FEISHU_APP_ID`，并设置 `FEISHU_TENANT_KEY`），在飞书应用中同时登记本平台的 `/api/auth/callback` 与中心的 `/auth/feishu/callback`。设置至少 32 字节的 `HARNESS_SHARED_SECRET`，与中心 `PRT_DATAHUB_SECRET` 相同；中心通过 `PRT_DATAHUB_URL` 访问本平台。密钥仅配置在两个服务端，不进入客户端。
+
+`POST /api/harness/exchange` 校验短时 HMAC 身份凭据、应用、租户和一次性 nonce，按同一应用的 `open_id` 匹配现有已授权用户，返回 30 分钟的限定范围令牌。请求仍执行现有角色、需求分配和文件权限；禁用账号立即失效。令牌只允许需求查询/附件、Demo 草稿创建和文件上传等接口，不能管理用户或执行审核发布。生产环境不会因 Harness 登录自动授予平台权限。
+
+本地使用 `DEMO_MODE=true`、回环地址和独立数据目录；配置共享密钥后会生成与 Harness 开发鉴权匹配的两位测试用户及两个已分配需求。设置 `APP_ORIGIN=http://127.0.0.1:3100`、`PORT=3100`，运行 `npm ci`、`npm run build`、`npm start`，打开同一地址体验；`npm run dev` 的前端使用 5173。

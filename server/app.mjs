@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { openStore, uid, now, parse } from './db.mjs';
 import { setupAuth, publicUser } from './auth.mjs';
 import { seedPreview } from './seed.mjs';
+import { seedHarnessPreview } from './harness-preview.mjs';
 import { queryCatalog } from './catalog.mjs';
 import { validateOrigin } from './runtime.mjs';
 import { createRagSearch } from './rag.mjs';
@@ -41,6 +42,7 @@ export function createApp(options = {}) {
   if (mode && mode.value !== (config.demoMode ? 'preview' : 'production')) { store.db.close(); throw new Error('Preview and production must use separate data directories'); }
   run("INSERT OR IGNORE INTO metadata VALUES('mode',?)", config.demoMode ? 'preview' : 'production');
   if (config.demoMode) seedPreview(store);
+  if (config.demoMode && (config.harnessSharedSecret || process.env.HARNESS_SHARED_SECRET)) seedHarnessPreview(store);
   const notifications = createNotifications(store, config);
   const requirementCalendar = createRequirementCalendar(store, config, notifications);
   const requirementWiki = createRequirementWiki(store, config);

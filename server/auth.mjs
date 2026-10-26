@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { uid, now, parse } from './db.mjs';
+import { setupHarnessAuth } from './harness-auth.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
@@ -14,7 +15,10 @@ export function setupAuth(app, store, config) {
   const origins = [...new Set([config.origin, config.publicOrigin, config.intranetOrigin].filter(Boolean))];
   const requestOrigin = req => origins.find(origin => new URL(origin).host === req.get('host')) || config.origin;
   const documentTokens = new Map();
+  const harness = setupHarnessAuth(app, store, config);
   const getUser = req => {
+    const delegated = harness.user(req);
+    if (delegated) return delegated;
     const token = req.cookies[sessionName];
     return token ? one('SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?', hash(token), Date.now()) : null;
   };
@@ -28,6 +32,7 @@ export function setupAuth(app, store, config) {
   };
   app.use('/api', (req, res, next) => {
     req.user = getUser(req);
+    if (req.harnessAuthenticated) return next();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       const origin = req.get('origin');
       if (!origins.includes(origin) || req.get('x-requested-with') !== 'PRT') return res.status(403).json({ error: '请求来源校验失败，请刷新页面后重试' });
@@ -38,11 +43,11 @@ export function setupAuth(app, store, config) {
   app.get('/api/auth/me', (req, res) => res.json({ user: publicUser(req.user), csrf: req.user?.csrf || '', demoMode: config.demoMode, feishuConfigured: !!(config.appId && config.appSecret && config.tenantKey) }));
   app.get('/api/auth/demo-users', (req, res) => {
     if (!config.demoMode) return res.sendStatus(404);
-    res.json(all("SELECT * FROM users WHERE open_id LIKE 'preview:%' AND enabled=1").map(publicUser));
+    res.json(all("SELECT * FROM users WHERE (open_id LIKE 'preview:%' OR id IN ('harness-preview-member','harness-preview-admin')) AND enabled=1").map(publicUser));
   });
   app.post('/api/auth/demo-login', (req, res) => {
     if (!config.demoMode) return res.sendStatus(404);
-    const user = one("SELECT * FROM users WHERE id=? AND open_id LIKE 'preview:%' AND enabled=1", req.body.userId || '');
+    const user = one("SELECT * FROM users WHERE id=? AND (open_id LIKE 'preview:%' OR id IN ('harness-preview-member','harness-preview-admin')) AND enabled=1", req.body.userId || '');
     if (!user) return res.status(400).json({ error: '演示账号不存在' });
     if (req.cookies[sessionName]) run('DELETE FROM sessions WHERE token=?', hash(req.cookies[sessionName]));
     issue(res, user); res.json({ ok: true });
