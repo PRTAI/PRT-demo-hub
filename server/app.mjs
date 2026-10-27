@@ -21,6 +21,7 @@ import { readModelConfig } from './model-config.mjs';
 import { createRequirements } from './requirements.mjs';
 import { setupNetwork } from './network.mjs';
 import { createBackup } from '../scripts/backup.mjs';
+import { platformLink } from '../shared/platform-links.mjs';
 
 const roles = ['employee', 'supervisor', 'pm', 'business', 'admin'];
 const working = ['draft', 'pending', 'returned'];
@@ -84,9 +85,9 @@ export function createApp(options = {}) {
   const summary = (user, asset, includeFiles = true) => {
     const versions = all('SELECT * FROM versions WHERE asset_id=? ORDER BY number DESC', asset.id);
     const latest = versions[0];
-    return { id: asset.id, owner: publicUser(one('SELECT * FROM users WHERE id=?', asset.owner_id)), creator: publicUser(one('SELECT * FROM users WHERE id=?', asset.creator_id)), currentVersionId: asset.current_version_id, currentVersion: versions.find(v => v.id === asset.current_version_id)?.number || null, revision: asset.revision, createdAt: asset.created_at, updatedAt: asset.updated_at, latest: latest ? versionData(latest, includeFiles, user, asset) : null, requirements: requirements.forAsset(asset.id), versionCount: versions.length, canManage: manage(user, asset), canEdit: editAccess(user, asset), canGrant: has(user,'pm') || (has(user,'supervisor') && manage(user,asset)), accessLevel: permission(user,asset), businessRestricted: businessRestricted(user, asset) };
+    return { id: asset.id, shareUrl: platformLink(config.publicOrigin || config.origin, { demoId: asset.id }), owner: publicUser(one('SELECT * FROM users WHERE id=?', asset.owner_id)), creator: publicUser(one('SELECT * FROM users WHERE id=?', asset.creator_id)), currentVersionId: asset.current_version_id, currentVersion: versions.find(v => v.id === asset.current_version_id)?.number || null, revision: asset.revision, createdAt: asset.created_at, updatedAt: asset.updated_at, latest: latest ? versionData(latest, includeFiles, user, asset) : null, requirements: requirements.forAsset(asset.id), versionCount: versions.length, canManage: manage(user, asset), canEdit: editAccess(user, asset), canGrant: has(user,'pm') || (has(user,'supervisor') && manage(user,asset)), accessLevel: permission(user,asset), businessRestricted: businessRestricted(user, asset) };
   };
-  const requirements = createRequirements(app, store, { has, fail, assetFor, visible, editAccess, summary, event, touch, checkRevision, settings, notifications, requirementCalendar, requirementWiki, demoMode: config.demoMode, documentToken: auth.documentToken });
+  const requirements = createRequirements(app, store, { has, fail, assetFor, visible, editAccess, summary, event, touch, checkRevision, settings, notifications, requirementCalendar, requirementWiki, demoMode: config.demoMode, publicOrigin: config.publicOrigin, origin: config.origin, documentToken: auth.documentToken });
   app.get('/api/catalog', (req, res) => {
     const { assets, ...catalog } = queryCatalog(store, req.user, req.query);
     res.json({ ...catalog, items: assets.map(a => summary(req.user, a, false)) });

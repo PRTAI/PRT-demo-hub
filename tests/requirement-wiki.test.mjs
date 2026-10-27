@@ -246,7 +246,7 @@ test('wiki splits long saved descriptions into API-sized blocks and batches whil
 test('export preparation creates the missing historical wiki, copies saved Demo sections and later refreshes the same document', async t => {
   const ctx = fixture(t), exports = createRequirementExports(ctx.store, ctx.wiki);
   const demo = ctx.demo({ title: '旧数据 Demo', content: '# 数据概述\n旧数据概述\n# 数据格式\n旧数据格式', costEstimate: '旧数据成本', difficulty: '旧数据难度', notes: '旧数据注意事项' });
-  const selected = [{ id: ctx.id, title: '历史需求', rows: [{ deadlineDate: '', demoName: '旧数据 Demo', associatedPeople: '负责人', documentUrl: '' }] }];
+  const selected = [{ id: ctx.id, title: '历史需求', rows: [{ title: '需求快照', deadlineDate: '', demoName: '旧数据 Demo', associatedPeople: '负责人', documentUrl: '' }] }];
   assert.equal(ctx.wiki.info(ctx.id).status, 'not_created'); assert.equal(ctx.wiki.configurationError(), '');
   const job = exports.create('preview-pm', { status: 'open' }, selected);
   assert.equal(job.status, 'pending'); assert.equal(ctx.calls.length, 0);

@@ -4,6 +4,7 @@ import { api, uploadFile } from './api';
 import { FilePreview } from './FilePreview';
 import { createRequestId } from './request-id.mjs';
 import { RequirementPicker } from './Requirements';
+import { ShareLink } from './ShareLink';
 import { Modal, ErrorBox, Badge, Avatar, FileIcon, Loading, Empty, bytes, date, actionLabels, roleLabels } from './components';
 
 const blank = { title: '', summary: '', category: '', tags: [], content: '', usage: '', costEstimate: '', difficulty: '', notes: '', changes: '', schemaVersion: 1 };
@@ -114,7 +115,7 @@ export function Detail({ id, user, onClose, onEdit, onChanged, onOpenRequirement
   const detailTabs = asset?.businessRestricted
     ? [['description', '数据说明', FileText], ['files', `文件清单 (${version?.files.length || 0})`, Download]]
     : [['description', '数据说明', FileText], ['files', `文件清单 (${version?.files.length || 0})`, Download], ['history', '版本与差异', GitCompareArrows], ['events', '操作记录', History], ...(asset?.canGrant ? [['permissions', '权限设置', ShieldCheck]] : [])];
-  return <Modal title={description?.title || 'Demo 详情'} subtitle={asset ? `创建人 ${asset.creator.name} · ${date(asset.createdAt)}` : '正在获取数据'} onClose={onClose} wide busy={busy}>
+  return <Modal title={description?.title || 'Demo 详情'} subtitle={asset ? `创建人 ${asset.creator.name} · ${date(asset.createdAt)}` : '正在获取数据'} onClose={onClose} wide busy={busy} actions={asset && <ShareLink url={asset.shareUrl}/> }>
     <div className="detail-body"><ErrorBox>{error}</ErrorBox>{!asset || !version ? error ? <button className="button" onClick={() => { setError(''); load(); }}>重新加载</button> : <Loading/> : <>
       <div className="detail-overview"><div><span className="category-tag">{description.category || '未分类'}</span>{description.tags.map(t => <span className="tag" key={t}>{t}</span>)}<p>{description.summary || '暂无简介'}</p></div><div className="detail-owner"><Avatar user={asset.owner}/><div><small>归属人</small><strong>{asset.owner.name}</strong></div></div></div>
       <section className="requirement-picker"><div className="requirement-picker-heading"><strong>关联需求</strong><span>绑定关系适用于整个 Demo，各版本共用</span></div>{asset.requirements.length ? <div className="requirement-links">{asset.requirements.map(item => <button type="button" key={item.id} onClick={() => onOpenRequirement(item.id)}>{item.title}{item.status === 'closed' && '（已关闭）'}<ArrowUpRight size={14}/></button>)}</div> : <p className="muted">尚未绑定需求，提交或发布前请先关联。可在编辑页选择需求，或由需求发布人在需求中心补绑。</p>}</section>

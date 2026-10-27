@@ -1,23 +1,31 @@
 import ExcelJS from 'exceljs';
 import { feishuDocumentLink } from '../shared/requirement-links.mjs';
 import { uid, now, parse } from './db.mjs';
+import { platformLink } from '../shared/platform-links.mjs';
+import { textLinks } from '../shared/requirement-links.mjs';
+import { splitRequirementOwners } from '../shared/requirement-owners.mjs';
 
-export const requirementExportColumns = ['截止日期', 'demo名称', '关联人员', 'demo的飞书文档超链接'];
+export const requirementExportColumns = ['标题', '需求说明', '需求文档', '商务负责人', '研发负责人', '进度', '截止日期', '样例'];
 
-export function requirementExportRows(requirement, people, demos, wikiUrl = '') {
-  const associatedPeople = people.map(person => person.name).join('、');
-  const documentUrl = feishuDocumentLink(wikiUrl)?.url || '';
-  if (!demos.length) return [{ deadlineDate: requirement.deadline_date, demoName: '', associatedPeople, documentUrl }];
-  return demos.map(demo => {
-    const description = demo.latest?.description || {};
-    return { deadlineDate: requirement.deadline_date, demoName: description.title || '未命名 Demo', associatedPeople, documentUrl };
-  });
+export function requirementExportRows(requirement, people, demos, { origin, documents = [] } = {}) {
+  const groups = splitRequirementOwners(people), names = users => [...new Map(users.map(user => [user.id || user.name, user.name])).values()].join('、');
+  const requirementUrl = platformLink(origin, { requirementId: requirement.id });
+  const content = requirement.content?.trim() || '', links = textLinks(content);
+  return [{
+    title: requirement.title, requirementUrl, content, contentUrl: links.length === 1 && links[0] === content ? links[0] : '',
+    documentNames: documents.map(file => file.name).join('\n'), documentsUrl: documents.length ? requirementUrl : '',
+    businessOwners: names(groups.businessOwners), developmentOwners: names(groups.developmentOwners),
+    status: ({ open: '进行中', needs_update: '待更新', delivered: '已交付', closed: '已关闭' })[requirement.status] || requirement.status,
+    deadlineDate: requirement.deadline_date || '', sampleNames: demos.map(demo => demo.latest?.description?.title || '未命名 Demo').join('\n'),
+    sampleUrl: demos.length === 1 ? platformLink(origin, { requirementId: requirement.id, demoId: demos[0].id }) : demos.length ? requirementUrl : ''
+  }];
 }
 
 export async function requirementWorkbook(rows) {
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('需求 Demo', { views: [{ state: 'frozen', ySplit: 1 }] });
-  sheet.columns = requirementExportColumns.map((header, index) => ({ header, width: [16, 38, 48, 26][index] }));
+  const sheet = workbook.addWorksheet('需求中心', { views: [{ state: 'frozen', ySplit: 1 }] });
+  const widths = [30, 54, 36, 22, 26, 14, 16, 36];
+  sheet.columns = requirementExportColumns.map((header, index) => ({ header, width: widths[index] }));
   const header = sheet.getRow(1);
   header.height = 30;
   header.eachCell(cell => {
@@ -26,22 +34,28 @@ export async function requirementWorkbook(rows) {
     cell.alignment = { vertical: 'middle', wrapText: true };
   });
   for (const item of rows) {
+    const linked = (value, url, tooltip) => url ? { text: value || '/', hyperlink: url, tooltip } : value || '/';
     const row = sheet.addRow([
-      item.deadlineDate ? new Date(`${item.deadlineDate}T00:00:00.000Z`) : null,
-      item.demoName,
-      item.associatedPeople,
-      item.documentUrl ? { text: '打开飞书文档', hyperlink: item.documentUrl } : ''
+      linked(item.title, item.requirementUrl, '打开需求详情'),
+      linked(item.content, item.contentUrl, '打开需求说明链接'),
+      linked(item.documentNames, item.documentsUrl, '打开需求详情，查看和下载需求文档'),
+      item.businessOwners || '/', item.developmentOwners || '/', item.status || '/',
+      item.deadlineDate ? new Date(`${item.deadlineDate}T00:00:00.000Z`) : '/',
+      linked(item.sampleNames, item.sampleUrl, '打开关联样例；多份样例可在需求详情中查看')
     ]);
-    row.height = Math.min(409, Math.max(36, Math.ceil(item.demoName.length / 24) * 18, Math.ceil(item.associatedPeople.length / 30) * 18));
+    row.height = Math.min(409, Math.max(40, ...row.values.slice(1).map((value, index) => {
+      const content = String(value?.text || (value instanceof Date ? '' : value) || '');
+      return content.split('\n').reduce((lines, line) => lines + Math.max(1, Math.ceil(Array.from(line).length / Math.floor(widths[index] / 2))), 0) * 18 + 12;
+    })));
     row.eachCell({ includeEmpty: true }, cell => {
       cell.font = { name: '微软雅黑', size: 11, color: { argb: 'FF31483A' } };
       cell.alignment = { vertical: 'middle', wrapText: true };
       if (row.number % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F6F1' } };
     });
-    row.getCell(1).numFmt = 'yyyy-mm-dd';
-    if (item.documentUrl) row.getCell(4).font = { name: '微软雅黑', size: 11, color: { argb: 'FF0563C1' }, underline: true };
+    row.getCell(7).numFmt = 'yyyy-mm-dd';
+    row.eachCell(cell => { if (cell.hyperlink) cell.font = { name: '微软雅黑', size: 11, color: { argb: 'FF0563C1' }, underline: true }; });
   }
-  sheet.autoFilter = { from: 'A1', to: `D${sheet.rowCount}` };
+  sheet.autoFilter = { from: 'A1', to: `H${sheet.rowCount}` };
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -63,6 +77,7 @@ export function createRequirementExports(store, wiki, { demoMode = false } = {})
   function status(id, userId) {
     const job = owned(id, userId);
     if (!job) return null;
+    if (all('SELECT rows FROM requirement_export_items WHERE export_id=?', id).some(item => parse(item.rows, []).some(row => !Object.hasOwn(row, 'title')))) return null;
     const items = all(`SELECT i.*,w.status AS wiki_status,w.error,w.url AS wiki_url,w.generation AS wiki_generation
       FROM requirement_export_items i LEFT JOIN requirement_wiki w ON w.requirement_id=i.requirement_id
       WHERE i.export_id=? ORDER BY i.position`, id);

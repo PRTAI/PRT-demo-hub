@@ -8,3 +8,13 @@ export function appendRequirementDocuments(current, selected) {
   }
   return files;
 }
+
+export function droppedRequirementDocuments(transfer) {
+  const items = Array.from(transfer?.items || []).filter(item => item.kind === 'file');
+  let hasDirectories = false;
+  const files = items.length ? items.flatMap(item => {
+    if (item.webkitGetAsEntry?.()?.isDirectory) { hasDirectories = true; return []; }
+    const file = item.getAsFile(); return file ? [file] : [];
+  }) : Array.from(transfer?.files || []);
+  return { files, hasDirectories };
+}

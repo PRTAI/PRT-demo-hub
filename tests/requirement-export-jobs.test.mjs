@@ -18,7 +18,7 @@ function fixture(t) {
   };
   ctx.reopen();
   t.after(() => { ctx.store.db.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  ctx.selected = ctx.store.all('SELECT * FROM requirements LIMIT 2').map((requirement, index) => ({ id: requirement.id, title: requirement.title, rows: [{ deadlineDate: '2028-01-02', demoName: 'Demo ' + index, associatedPeople: '负责人', documentUrl: '' }] }));
+  ctx.selected = ctx.store.all('SELECT * FROM requirements LIMIT 2').map((requirement, index) => ({ id: requirement.id, title: requirement.title, rows: [{ title: '需求快照', deadlineDate: '2028-01-02', demoName: 'Demo ' + index, associatedPeople: '负责人', documentUrl: '' }] }));
   // Ensure two distinct historical requirements even if preview fixtures later contain only one.
   if (ctx.selected.length < 2) {
     const id = uid();

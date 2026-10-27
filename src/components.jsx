@@ -11,7 +11,7 @@ export function FileIcon({ name = '', large = false }) { const archive = /\.(zip
 export function Empty({ title = '暂时没有 Demo', description = '上传第一个数据样例，让数据更容易被管理和复用。', action }) { return <div className="empty"><div className="empty-icon"><Database size={32}/></div><h3>{title}</h3><p>{description}</p>{action}</div>; }
 export function Loading() { return <div className="loading"><LoaderCircle className="spin" size={24}/><span>正在加载…</span></div>; }
 export function ErrorBox({ children }) { return children ? <div className="error-box" role="alert"><AlertCircle size={17}/><span>{children}</span></div> : null; }
-export function Modal({ title, subtitle, children, onClose, wide = false, busy = false }) {
+export function Modal({ title, subtitle, children, onClose, wide = false, busy = false, actions }) {
   const ref = useRef();
   const behavior = useRef({ busy, onClose }); behavior.current = { busy, onClose };
   useEffect(() => {
@@ -23,7 +23,7 @@ export function Modal({ title, subtitle, children, onClose, wide = false, busy =
     };
     document.addEventListener('keydown', key); return () => { document.body.style.overflow = previousOverflow; document.removeEventListener('keydown', key); previous?.focus(); };
   }, []);
-  return <div className="workspace-page-shell"><section className={`workspace-page modal ${wide ? 'wide' : ''}`} role="region" aria-label={title} tabIndex={-1} ref={ref}><header className="modal-header page-view-header"><button className="page-back" aria-label="返回上一页" onClick={onClose} disabled={busy}><ArrowLeft size={19}/>返回</button><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div></header>{children}</section></div>;
+  return <div className="workspace-page-shell"><section className={`workspace-page modal ${wide ? 'wide' : ''}`} role="region" aria-label={title} tabIndex={-1} ref={ref}><header className="modal-header page-view-header"><button className="page-back" aria-label="返回上一页" onClick={onClose} disabled={busy}><ArrowLeft size={19}/>返回</button><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{actions && <div className="page-view-actions">{actions}</div>}</header>{children}</section></div>;
 }
 export function Toast({ message }) { return message ? <div className="toast" role="status"><Check size={18}/>{message}</div> : null; }
 export function RowLink({ children, onClick }) { return <button className="text-link" onClick={onClick}>{children}<ArrowUpRight size={14}/></button>; }

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { uid, now, parse } from './db.mjs';
+import { platformPath } from '../shared/platform-links.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
@@ -57,8 +58,7 @@ export function setupAuth(app, store, config) {
     const state = secret(), verifier = secret();
     run('DELETE FROM oauth_states WHERE expires<?', Date.now());
     const origin = requestOrigin(req);
-    const requirementId = typeof req.query.requirement === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.query.requirement) ? req.query.requirement : '';
-    const returnPath = requirementId ? '/?' + new URLSearchParams({ view: 'requirements', requirement: requirementId }) : '/';
+    const returnPath = platformPath({ requirementId: typeof req.query.requirement === 'string' ? req.query.requirement : '', demoId: typeof req.query.demo === 'string' ? req.query.demo : '' });
     run('INSERT INTO oauth_states(state,verifier,expires,origin,return_path) VALUES(?,?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin, returnPath);
     res.cookie(oauthName, state, { ...cookies, maxAge: 600000 });
     const url = new URL('https://accounts.feishu.cn/open-apis/authen/v1/authorize');

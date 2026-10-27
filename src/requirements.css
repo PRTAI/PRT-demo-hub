@@ -160,3 +160,9 @@
 .requirement-export-progress details { margin: 12px 0; font-size: 13px; }
 .requirement-export-progress li { margin: 6px 0; overflow-wrap: anywhere; }
 .requirement-export-progress .requirement-actions { flex-wrap: wrap; justify-content: flex-start; margin-top: 12px; }
+.requirement-document-dropzone { width:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:30px 18px; border:2px dashed #bfceb5; border-radius:12px; background:#f8fbf5; color:#567345; transition:background .18s,border-color .18s,box-shadow .18s; text-align:center; }
+.requirement-document-dropzone strong { font-size:14px; line-height:1.6; }
+.requirement-document-dropzone span { color:#7c8e70; font-size:12px; line-height:1.6; }
+.requirement-document-dropzone.dragging,.requirement-document-dropzone:focus-visible { background:#eaf4e2; border-color:#648947; box-shadow:0 0 0 4px #73985818; outline:none; }
+.requirement-document-dropzone:disabled { opacity:.6; cursor:wait; }
+.requirement-list-main>.share-link { display:inline-flex; margin:10px 0 0 10px; }

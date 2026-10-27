@@ -72,4 +72,13 @@ test('Feishu login returns requirement notifications to their detail page and re
     const callback = await agent.get('/api/auth/callback').query({ state, code: 'test-code' }).expect(302);
     assert.equal(callback.headers.location, requirement === id ? '/?view=requirements&requirement=' + id : '/');
   }
+  for (const query of [{ demo: id }, { requirement: id, demo: id }, { demo: 'https://attacker.example' }, { demo: [id, id] }]) {
+    const agent = request.agent(app), begin = await agent.get('/api/auth/feishu').query(query).expect(302);
+    const state = new URL(begin.headers.location).searchParams.get('state');
+    const callback = await agent.get('/api/auth/callback').query({ state, code: 'test-code' }).expect(302);
+    const target = new URL(callback.headers.location, 'http://127.0.0.1:3100');
+    assert.equal(target.origin, 'http://127.0.0.1:3100');
+    assert.equal(target.searchParams.get('demo'), query.demo === id ? id : null);
+    assert.equal(target.searchParams.get('requirement'), query.requirement || null);
+  }
 });

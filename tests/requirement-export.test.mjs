@@ -3,47 +3,43 @@ import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 import { requirementExportRows, requirementWorkbook, requirementExportColumns } from '../server/requirement-export.mjs';
 
-test('requirement export uses the dedicated requirement wiki URL for every Demo and ignores links in Demo content', () => {
-  const requirement = { deadline_date: '2028-02-29', content: 'https://team.feishu.cn/docx/RequirementOnly' };
-  const people = [{ name: '商务甲' }, { name: '研发乙' }];
-  const first = 'https://team.feishu.cn/docx/DemoOne?from=export&lang=zh', second = 'https://team.feishu.cn/wiki/DemoTwo';
-  const demos = [
-    { latest: { description: { title: '=1+1', content: `[文档](${first})\n${second}\n${first}\nhttps://evil.example/docx/Token\nhttps://team.feishu.cn.evil.example/docx/Token\nhttp://team.feishu.cn/docx/Token` } } },
-    { latest: { description: { title: '没有文档的 Demo', content: '本地文件' } } }
-  ];
-  const wiki = 'https://team.feishu.cn/wiki/RequirementDoc';
-  const rows = requirementExportRows(requirement, people, demos, wiki);
-  assert.deepEqual(rows.map(row => row.documentUrl), [wiki, wiki]);
-  assert.deepEqual(rows.map(row => row.demoName), ['=1+1', '没有文档的 Demo']);
-  assert.ok(rows.every(row => row.deadlineDate === '2028-02-29' && row.associatedPeople === '商务甲、研发乙'));
-  assert.deepEqual(requirementExportRows({ deadline_date: '' }, [], []), [{ deadlineDate: '', demoName: '', associatedPeople: '', documentUrl: '' }]);
-  assert.equal(requirementExportRows(requirement, people, [], wiki)[0].documentUrl, wiki);
-  assert.equal(requirementExportRows(requirement, people, demos, 'https://evil.example/wiki/Token')[0].documentUrl, '');
-  assert.equal(requirementExportRows(requirement, people, demos)[0].documentUrl, '');
+const id = '00000000-0000-4000-8000-000000000001', demoId = '00000000-0000-4000-8000-000000000002';
+const origin = 'https://demo.example.internal';
+const requirement = { id, title: 'P1:医疗数据', content: 'https://example.org/requirements', status: 'needs_update', deadline_date: '2028-02-29' };
+const people = [{ id: 'business', name: '商务甲', responsibility: 'business' }, { id: 'engineer', name: '研发乙', responsibility: 'development' }, { id: 'both', name: '双角色', responsibility: 'both' }];
+
+test('template export uses one row per requirement, separate owners and stable platform links for documents and multiple samples', () => {
+  const demos = [{ id: demoId, latest: { description: { title: '=1+1', content: 'https://team.feishu.cn/wiki/IgnoreThis' } } }, { id, latest: { description: { title: '第二份 Demo' } } }];
+  const rows = requirementExportRows(requirement, people, demos, { origin, documents: [{ name: '需求一.pdf' }, { name: '需求二.docx' }] });
+  assert.equal(rows.length, 1);
+  const row = rows[0];
+  assert.equal(row.title, requirement.title); assert.equal(row.content, requirement.content); assert.equal(row.contentUrl, requirement.content);
+  assert.equal(row.businessOwners, '商务甲、双角色'); assert.equal(row.developmentOwners, '研发乙、双角色');
+  assert.equal(row.status, '待更新'); assert.equal(row.deadlineDate, '2028-02-29');
+  assert.equal(row.documentNames, '需求一.pdf\n需求二.docx'); assert.equal(row.sampleNames, '=1+1\n第二份 Demo');
+  assert.equal(row.documentsUrl, `${origin}/?view=requirements&requirement=${id}`);
+  assert.equal(row.sampleUrl, row.requirementUrl);
+  const single = requirementExportRows(requirement, [], [demos[0]], { origin })[0];
+  assert.equal(new URL(single.sampleUrl).searchParams.get('demo'), demoId);
+  assert.equal(new URL(single.sampleUrl).searchParams.get('requirement'), id);
+  const empty = requirementExportRows({ ...requirement, content: '', deadline_date: '' }, [], [], { origin })[0];
+  assert.equal(empty.sampleUrl, ''); assert.equal(empty.documentsUrl, ''); assert.equal(empty.content, '');
+  assert.equal(requirementExportRows({ ...requirement, content: '说明中含 https://example.org/requirements 但不只链接' }, [], [], { origin })[0].contentUrl, '');
 });
 
-test('Excel export writes exactly four ordered columns, typed dates, safe text and native clickable hyperlinks', async () => {
-  const url = 'https://team.feishu.cn/docx/DemoOne?from=export&lang=zh';
-  const buffer = await requirementWorkbook([
-    { deadlineDate: '2028-02-29', demoName: '=HYPERLINK("https://evil.example")', associatedPeople: '+张三、@李四', documentUrl: url },
-    { deadlineDate: '', demoName: 'Demo B', associatedPeople: '', documentUrl: '' }
-  ]);
-  assert.equal(buffer.subarray(0, 2).toString(), 'PK');
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
-  assert.equal(workbook.worksheets.length, 1);
+test('Excel export matches the eight-column template with typed dates, placeholders, safe text and native hyperlinks', async () => {
+  const row = requirementExportRows({ ...requirement, title: '=HYPERLINK("https://evil.example")' }, people, [{ id: demoId, latest: { description: { title: '+原始 Demo' } } }], { origin, documents: [{ name: '需求.pdf' }] })[0];
+  const blank = requirementExportRows({ ...requirement, title: '无附件需求', content: '', deadline_date: '' }, [], [], { origin })[0];
+  const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(await requirementWorkbook([row, blank]));
   const sheet = workbook.worksheets[0];
-  assert.equal(sheet.columnCount, 4); assert.equal(sheet.rowCount, 3);
+  assert.equal(sheet.columnCount, 8); assert.equal(sheet.rowCount, 3);
+  assert.deepEqual(sheet.getRow(1).values.slice(1), ['标题', '需求说明', '需求文档', '商务负责人', '研发负责人', '进度', '截止日期', '样例']);
   assert.deepEqual(sheet.getRow(1).values.slice(1), requirementExportColumns);
-  assert.equal(sheet.getCell('A2').value.toISOString(), '2028-02-29T00:00:00.000Z');
-  assert.equal(sheet.getCell('A2').numFmt, 'yyyy-mm-dd');
-  assert.equal(sheet.getCell('B2').value, '=HYPERLINK("https://evil.example")');
-  assert.equal(sheet.getCell('B2').formula, undefined);
-  assert.equal(sheet.getCell('C2').value, '+张三、@李四');
-  assert.equal(sheet.getCell('D2').hyperlink, url);
-  assert.equal(sheet.getCell('D2').text, '打开飞书文档');
-  assert.equal(sheet.getCell('A3').value, null); assert.equal(sheet.getCell('D3').text, '');
-  assert.equal(sheet.views[0].ySplit, 1); assert.equal(sheet.autoFilter, 'A1:D3');
-  const empty = new ExcelJS.Workbook(); await empty.xlsx.load(await requirementWorkbook([]));
-  assert.equal(empty.worksheets[0].rowCount, 1);
+  assert.equal(sheet.getCell('A2').text, row.title); assert.equal(sheet.getCell('A2').formula, undefined); assert.equal(sheet.getCell('A2').hyperlink, row.requirementUrl);
+  assert.equal(sheet.getCell('B2').hyperlink, requirement.content); assert.equal(sheet.getCell('C2').hyperlink, row.documentsUrl);
+  assert.equal(sheet.getCell('D2').text, '商务甲、双角色'); assert.equal(sheet.getCell('E2').text, '研发乙、双角色'); assert.equal(sheet.getCell('F2').text, '待更新');
+  assert.equal(sheet.getCell('G2').value.toISOString(), '2028-02-29T00:00:00.000Z'); assert.equal(sheet.getCell('G2').numFmt, 'yyyy-mm-dd');
+  assert.equal(sheet.getCell('H2').hyperlink, row.sampleUrl); assert.equal(sheet.getCell('H2').text, '+原始 Demo');
+  for (const column of ['B', 'C', 'D', 'E', 'G', 'H']) assert.equal(sheet.getCell(column + '3').text, '/');
+  assert.equal(sheet.views[0].ySplit, 1); assert.equal(sheet.autoFilter, 'A1:H3');
 });

@@ -11,6 +11,7 @@ import { previewFeishuDocument } from './feishu-documents.mjs';
 import { requirementDate, validRequirementDate } from '../shared/requirement-schedule.mjs';
 import { businessOwnerRoles, developmentOwnerRoles, defaultResponsibility, splitRequirementOwners } from '../shared/requirement-owners.mjs';
 import { createRequirementExports, requirementExportRows, requirementWorkbook } from './requirement-export.mjs';
+import { platformLink } from '../shared/platform-links.mjs';
 
 const userIdsSchema = z.array(z.string().trim().min(1).max(100)).max(100);
 const dateSchema = z.string().refine(value => value === '' || validRequirementDate(value), '请选择有效日期').optional();
@@ -27,6 +28,8 @@ export function createRequirements(app, store, helpers) {
   const { has, fail, assetFor, visible, summary, event, touch, checkRevision, settings, notifications, requirementCalendar, requirementWiki } = helpers;
   const exports = createRequirementExports(store, requirementWiki, { demoMode: helpers.demoMode });
   const requireExportPermission = user => { if (!has(user, 'pm')) fail(403, '仅项目经理可以导出需求表格'); };
+  const shareUrl = id => platformLink(helpers.publicOrigin || helpers.origin, { requirementId: id });
+  const exportRows = (user, requirement) => requirementExportRows(requirement, assigned(requirement.id), linkedAssets(user, requirement.id).map(asset => summary(user, asset, false)), { origin: helpers.publicOrigin || helpers.origin, documents: documents(requirement.id) });
   const canPublish = user => has(user, 'pm') || has(user, 'business');
   const canManage = (user, requirement) => canPublish(user) && requirement.publisher_id === user.id;
   const canStatusManage = user => canPublish(user);
@@ -78,7 +81,7 @@ export function createRequirements(app, store, helpers) {
   };
   const data = (user, requirement) => {
     const people = assigned(requirement.id), groups = splitRequirementOwners(people), dates = schedule({}, requirement);
-    return { id: requirement.id, title: requirement.title, content: requirement.content, category: requirement.category, status: requirement.status, publisher: publicUser(one('SELECT * FROM users WHERE id=?', requirement.publisher_id)), assignedUsers: people.map(publicUser), businessOwners: groups.businessOwners.map(publicUser), developmentOwners: groups.developmentOwners.map(publicUser), ...dates, plannedDate: dates.publishDate, calendar: requirementCalendar.info(requirement.id), canRetryCalendar: canRetryCalendar(user), wiki: requirementWiki.info(requirement.id), canSyncWiki: canRetryCalendar(user), documents: documents(requirement.id), revision: requirement.revision, createdAt: requirement.created_at, updatedAt: requirement.updated_at, canManage: canManage(user, requirement), canStatusManage: canStatusManage(user), canView: canView(user, requirement), canForward: canForward(user, requirement) };
+    return { id: requirement.id, shareUrl: shareUrl(requirement.id), title: requirement.title, content: requirement.content, category: requirement.category, status: requirement.status, publisher: publicUser(one('SELECT * FROM users WHERE id=?', requirement.publisher_id)), assignedUsers: people.map(publicUser), businessOwners: groups.businessOwners.map(publicUser), developmentOwners: groups.developmentOwners.map(publicUser), ...dates, plannedDate: dates.publishDate, calendar: requirementCalendar.info(requirement.id), canRetryCalendar: canRetryCalendar(user), wiki: requirementWiki.info(requirement.id), canSyncWiki: canRetryCalendar(user), documents: documents(requirement.id), revision: requirement.revision, createdAt: requirement.created_at, updatedAt: requirement.updated_at, canManage: canManage(user, requirement), canStatusManage: canStatusManage(user), canView: canView(user, requirement), canForward: canForward(user, requirement) };
   };
   const linkedAssets = (user, id) => all('SELECT a.* FROM assets a JOIN asset_requirements ar ON ar.asset_id=a.id WHERE ar.requirement_id=? ORDER BY a.updated_at DESC,a.id', id).filter(asset => visible(user, asset));
   const forAsset = id => all('SELECT r.id,r.title,r.category,r.status FROM requirements r JOIN asset_requirements ar ON ar.requirement_id=r.id WHERE ar.asset_id=? ORDER BY r.created_at,r.id', id);
@@ -122,7 +125,7 @@ export function createRequirements(app, store, helpers) {
   app.get('/api/requirements/export.xlsx', async (req, res) => {
     requireExportPermission(req.user);
     const query = filterSchema.parse(req.query), { from, where, args } = filteredRequirements(req.user, query);
-    const rows = all(`SELECT r.* ${from} ${where} ORDER BY ${requirementOrder}`, ...args).flatMap(requirement => requirementExportRows(requirement, assigned(requirement.id), linkedAssets(req.user, requirement.id).map(asset => summary(req.user, asset, false)), requirementWiki.info(requirement.id).url));
+    const rows = all(`SELECT r.* ${from} ${where} ORDER BY ${requirementOrder}`, ...args).flatMap(requirement => exportRows(req.user, requirement));
     const file = await requirementWorkbook(rows);
     res.attachment(`requirements-${requirementDate()}.xlsx`).type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(file);
   });
@@ -134,7 +137,7 @@ export function createRequirements(app, store, helpers) {
       const error = requirementWiki.configurationError();
       if (error) fail(400, error);
     }
-    const items = selected.map(requirement => ({ id: requirement.id, title: requirement.title, rows: requirementExportRows(requirement, assigned(requirement.id), linkedAssets(req.user, requirement.id).map(asset => summary(req.user, asset, false))) }));
+    const items = selected.map(requirement => ({ id: requirement.id, title: requirement.title, rows: exportRows(req.user, requirement) }));
     const job = exports.create(req.user.id, query, items);
     event(req.user, 'requirement_export', null, null, { exportId: job.id, filters: query, requirements: items.length });
     res.status(202).json(job);

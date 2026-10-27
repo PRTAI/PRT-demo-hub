@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowLeft, ArrowUpRight, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, Forward, Link2, Plus, Search, Users, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowLeft, ArrowUpRight, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, Forward, Link2, Plus, Search, UploadCloud, Users, X } from 'lucide-react';
 import { api, downloadFile, uploadRequirementDocument } from './api';
 import { Badge, Empty, ErrorBox, Loading, Modal, bytes, date, roleLabels } from './components';
-import { appendRequirementDocuments } from './requirement-documents.mjs';
+import { appendRequirementDocuments, droppedRequirementDocuments } from './requirement-documents.mjs';
+import { ShareLink } from './ShareLink';
 import { textLinks, feishuDocumentLink } from '../shared/requirement-links.mjs';
 import { requirementDate, requirementDeadlineState } from '../shared/requirement-schedule.mjs';
 import { businessOwnerRoles, developmentOwnerRoles } from '../shared/requirement-owners.mjs';
@@ -121,7 +122,17 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
 }
 
 function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDocuments, setPendingDocuments, uploadProgress, error, busy, save, cancelEdit }) {
-  const documentInput = useRef(null);
+  const documentInput = useRef(null), dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false), [documentError, setDocumentError] = useState('');
+  useEffect(() => { if (busy) { dragDepth.current = 0; setDragging(false); } }, [busy]);
+  function addDocuments(files) { if (busy) return; setDocumentError(''); setPendingDocuments(current => appendRequirementDocuments(current, files)); }
+  function dropDocuments(event) {
+    event.preventDefault(); event.stopPropagation(); dragDepth.current = 0; setDragging(false);
+    if (busy) return;
+    const result = droppedRequirementDocuments(event.dataTransfer);
+    addDocuments(result.files);
+    if (result.hasDirectories) setDocumentError('已跳过文件夹，请拖入具体需求文档；多个文档可以一起拖入。');
+  }
   const publishDate = editing.publishDate || editing.plannedDate || requirementDate();
   return <>
     <section className="page-heading"><div><div className="eyebrow">BUSINESS REQUIREMENTS</div><h1>{editing.id ? '编辑需求' : '发布需求'}<span className="heading-dot">.</span></h1><p>说明业务场景、需要的数据和验收标准，方便团队准备 Demo。</p></div></section>
@@ -141,9 +152,12 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
       <p className="requirement-owner-hint">两组均可不选或多选。发布后通知两组负责人及发布人，并邀请参加需求日程；转发新增人员归入研发负责人。</p>
       <div className="requirement-document-picker">
         <strong>需求文档（可选，可多选）</strong>
-        <p className="muted">可按住 Ctrl 或 Shift 一次选择多个文件，也可多次点击添加，已选文件会保留。单文件 ≤ {config?.maxFileMB || 512} MB。</p>
-        <input ref={documentInput} type="file" multiple hidden aria-label="选择需求文档" disabled={busy} onChange={event => { const files = Array.from(event.target.files || []); setPendingDocuments(current => appendRequirementDocuments(current, files)); event.target.value = ''; }}/>
-        <button type="button" className="button" disabled={busy} onClick={() => documentInput.current.click()}><Plus size={16}/>添加需求文档</button>
+        <p className="muted">支持拖入多个文件，也可多次点击添加，已选文件会保留并自动去重。单文件 ≤ {config?.maxFileMB || 512} MB。</p>
+        <input ref={documentInput} type="file" multiple hidden aria-label="选择需求文档" disabled={busy} onChange={event => { addDocuments(Array.from(event.target.files || [])); event.target.value = ''; }}/>
+        <button type="button" className={`requirement-document-dropzone ${dragging ? 'dragging' : ''}`} disabled={busy} onClick={() => documentInput.current.click()} onDragEnter={event => { event.preventDefault(); if (!busy && Array.from(event.dataTransfer.types || []).includes('Files')) { dragDepth.current++; setDragging(true); } }} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; }} onDragLeave={event => { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }} onDrop={dropDocuments}>
+          <UploadCloud size={30}/><strong>{busy ? '文档保存中…' : dragging ? '松开鼠标，添加需求文档' : '拖动需求文档到这里，或点击选择'}</strong><span>可多选、可分次添加；发布或保存时上传</span>
+        </button>
+        <ErrorBox>{documentError}</ErrorBox>
         {!!editing.documents?.length && <p className="muted">已保存 {editing.documents.length} 个文档，本次添加会保留已有文档。</p>}
         <p className="muted" role="status">待上传 {pendingDocuments.length} 个文档{busy && uploadProgress > 0 ? ` · 当前文件上传进度 ${uploadProgress}%` : ''}</p>
         <div className="requirement-pending-documents">{pendingDocuments.map((file, index) => <div key={index}><FileText size={16}/><span>{file.name}<small>{bytes(file.size)}</small></span><button type="button" className="icon-button" disabled={busy} aria-label={`移除待上传文档 ${file.name}`} onClick={() => setPendingDocuments(current => current.filter(item => item !== file))}><X size={16}/></button></div>)}</div>
@@ -186,6 +200,7 @@ function RequirementList({ data, loading, query, setQuery, status, setStatus, on
         <RequirementOwners requirement={item}/>
         <small className="requirement-list-meta"><span>发布人 {item.publisher.name} · {item.category || '未分类'} · 发布 {item.publishDate}</span><RequirementDeadline requirement={item}/><span>更新 {date(item.updatedAt)}</span></small>
         {item.wiki?.url && <a className="requirement-wiki-link" href={item.wiki.url} target="_blank" rel="noopener noreferrer"><FileText size={14}/>飞书协作文档<ExternalLink size={12}/></a>}
+        <ShareLink url={item.shareUrl}/>
       </div>
       <button className="requirement-count" onClick={() => onSelect(item.id)} aria-label={`查看需求 ${item.title}`}>{item.demoCount} 个可见 Demo<ArrowUpRight size={16}/></button>
     </article>)}</div> : <Empty title="暂无匹配需求" description={canPublish ? '尝试搜索负责人姓名，或发布新的业务需求。' : '仅展示指定给你的需求，可按负责人姓名搜索。'}/>}
@@ -281,7 +296,7 @@ function RequirementDetail({ detail, canCreateDemo, busy, binding, setBinding, o
   const [forwarding, setForwarding] = useState(false);
   return <>
     <section className="settings-card requirement-detail">
-      <div className="requirement-title"><h2>{detail.title}</h2><span className={`requirement-status ${detail.status}`}>{statusLabel(detail.status)}</span></div>
+      <div className="requirement-title"><h2>{detail.title}</h2><span className={`requirement-status ${detail.status}`}>{statusLabel(detail.status)}</span><ShareLink url={detail.shareUrl}/></div>
       <div className="requirement-meta requirement-list-meta"><span>发布人 {detail.publisher.name} · {detail.category || '未分类'} · 发布日期 {detail.publishDate}</span><RequirementDeadline requirement={detail}/><span>更新于 {date(detail.updatedAt)}</span></div>
       <div className="requirement-content">{renderLinkedText(detail.content)}</div>
       <RequirementLinkPreviews key={`${detail.id}:${detail.revision}`} requirement={detail}/>

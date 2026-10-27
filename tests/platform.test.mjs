@@ -1147,7 +1147,7 @@ test('requirement deadlines sort globally before pagination, put missing dates b
   assert.deepEqual((await pm.get(query + '&status=closed').expect(200)).body.items.map(item => item.id), [items[0].id, items[4].id]);
 });
 
-test('only PMs export requirements and the workbook uses dedicated wiki URLs and the exact current filters across pages', async t => {
+test('only PMs export the eight-column template with one requirement per row, separate owners and valid filtered links', async t => {
   const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee'), business = await ctx.login('preview-business'), other = await ctx.login('preview-other'), admin = await ctx.login('preview-admin'), supervisor = await ctx.login('preview-other-manager');
   const first = await publishRequirement(pm, { title: '表格导出验收-近', publishDate: '2028-01-01', deadlineDate: '2028-01-02', businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee'] });
   const second = await publishRequirement(pm, { title: '表格导出验收-远', publishDate: '2028-01-01', deadlineDate: '2028-02-01', assignedUserIds: ['preview-pm'] });
@@ -1168,18 +1168,22 @@ test('only PMs export requirements and the workbook uses dedicated wiki URLs and
     const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(result.body);
     return workbook.worksheets[0];
   }
+  await requirementUpload(pm, first.id, Buffer.from('export requirement document'), '导出需求文档.pdf');
   const query = 'q=' + encodeURIComponent('表格导出验收-') + '&pageSize=1&page=2';
   const sheet = await exported(pm, query);
-  assert.equal(sheet.columnCount, 4); assert.equal(sheet.rowCount, 6);
-  assert.deepEqual(sheet.getRow(1).values.slice(1), ['截止日期', 'demo名称', '关联人员', 'demo的飞书文档超链接']);
-  assert.equal(sheet.getCell('A2').value.toISOString().slice(0, 10), '2028-01-02');
-  assert.equal(sheet.getCell('A5').value.toISOString().slice(0, 10), '2028-02-01');
-  assert.equal(sheet.getCell('A6').value, null); assert.equal(sheet.getCell('B6').text, '');
-  const firstRow = [2, 3, 4].find(number => sheet.getCell(`B${number}`).text === '=导出 Demo A');
-  assert.ok(firstRow); assert.equal(sheet.getCell(`D${firstRow}`).hyperlink, wikiUrl);
-  for (const number of [2, 3, 4]) assert.equal(sheet.getCell(`D${number}`).hyperlink, wikiUrl);
-  assert.equal(sheet.getCell(`B${firstRow}`).formula, undefined);
-  assert.match(sheet.getCell(`C${firstRow}`).text, /商务同事/); assert.match(sheet.getCell(`C${firstRow}`).text, /陈思远/);
+  assert.equal(sheet.columnCount, 8); assert.equal(sheet.rowCount, 4);
+  assert.deepEqual(sheet.getRow(1).values.slice(1), ['标题', '需求说明', '需求文档', '商务负责人', '研发负责人', '进度', '截止日期', '样例']);
+  assert.equal(sheet.getCell('G2').value.toISOString().slice(0, 10), '2028-01-02');
+  assert.equal(sheet.getCell('G3').value.toISOString().slice(0, 10), '2028-02-01');
+  assert.equal(sheet.getCell('G4').text, '/'); assert.equal(sheet.getCell('H4').text, '/');
+  assert.equal(new URL(sheet.getCell('A2').hyperlink).searchParams.get('requirement'), first.id);
+  assert.equal(sheet.getCell('C2').text, '导出需求文档.pdf');
+  assert.equal(sheet.getCell('C2').hyperlink, sheet.getCell('A2').hyperlink);
+  assert.match(sheet.getCell('H2').text, /=导出 Demo A/); assert.match(sheet.getCell('H2').text, /导出 Demo B/);
+  assert.equal(sheet.getCell('H2').hyperlink, sheet.getCell('A2').hyperlink);
+  assert.equal(sheet.getCell('H2').formula, undefined);
+  assert.match(sheet.getCell('D2').text, /商务同事/); assert.match(sheet.getCell('E2').text, /陈思远/);
+  assert.equal(sheet.getCell('F2').text, '进行中');
   for (const client of [employee, business, other, admin, supervisor]) {
     await client.get('/requirements/export.xlsx?' + query).expect(403);
     assert.equal((await client.get('/requirements').expect(200)).body.canExport, false);
@@ -1188,10 +1192,11 @@ test('only PMs export requirements and the workbook uses dedicated wiki URLs and
   assert.equal((await exported(pm, query + '&assigned=1')).rowCount, 2);
   assert.equal((await exported(pm, query + '&status=closed')).rowCount, 1);
   ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", second.id);
-  assert.equal((await exported(pm, query + '&status=open')).rowCount, 5);
+  assert.equal((await exported(pm, query + '&status=open')).rowCount, 3);
   const closed = await exported(pm, query + '&status=closed');
-  assert.equal(closed.rowCount, 2); assert.equal(closed.getCell('B2').text, '无权查看的需求 Demo');
-  assert.equal((await exported(pm, 'q=' + encodeURIComponent('商务同事'))).getCell('A2').value.toISOString().slice(0, 10), '2028-01-02');
+  assert.equal(closed.rowCount, 2); assert.equal(closed.getCell('H2').text, '无权查看的需求 Demo');
+  assert.ok(new URL(closed.getCell('H2').hyperlink).searchParams.get('demo'));
+  assert.equal((await exported(pm, 'q=' + encodeURIComponent('商务同事'))).getCell('G2').value.toISOString().slice(0, 10), '2028-01-02');
   await pm.get('/requirements/export.xlsx?status=invalid').expect(400);
   await request(ctx.app).get('/api/requirements/export.xlsx').expect(401);
   assert.equal((await pm.get(`/requirements/${noDemo.id}`).expect(200)).body.demos.length, 0);
@@ -1245,11 +1250,12 @@ test('prepared exports freeze the selected filter scope, restrict job access and
     const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => callback(null, Buffer.concat(chunks))); res.on('error', callback);
   }).expect(200);
   const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(file.body); const sheet = workbook.worksheets[0];
-  assert.equal(sheet.rowCount, 3); assert.equal(sheet.columnCount, 4);
-  assert.equal(sheet.getCell('A2').value.toISOString().slice(0, 10), '2028-01-02');
-  assert.equal(sheet.getCell('B2').text, '历史快照 Demo');
-  assert.equal(sheet.getCell('D2').hyperlink, 'https://team.feishu.cn/wiki/Export0');
-  assert.equal(sheet.getCell('D3').hyperlink, 'https://team.feishu.cn/wiki/Export1');
+  assert.equal(sheet.rowCount, 3); assert.equal(sheet.columnCount, 8);
+  assert.equal(sheet.getCell('G2').value.toISOString().slice(0, 10), '2028-01-02');
+  assert.equal(sheet.getCell('H2').text, '历史快照 Demo');
+  assert.equal(new URL(sheet.getCell('H2').hyperlink).searchParams.get('requirement'), first.id);
+  assert.equal(new URL(sheet.getCell('A3').hyperlink).searchParams.get('requirement'), second.id);
+  assert.equal(sheet.getCell('H3').text, '/');
   ctx.store.run("UPDATE users SET roles='[\"employee\"]' WHERE id='preview-pm'");
   await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(403);
 });

@@ -108,3 +108,8 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .file-preview .preview-code{max-height:none;overflow-x:auto;overflow-y:visible;touch-action:pan-x pan-y}
   .file-preview .archive-list{max-height:none;overflow:visible}
 }
+.share-link { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.share-link>label { font-size:12px; }
+.share-link input { max-width:100%; min-width:180px; margin-left:6px; font-size:12px; }
+.page-view-header>.page-view-actions { margin-left:auto; flex:0 0 auto; }
+@media(max-width:700px) { .page-view-header { flex-wrap:wrap; } .page-view-header>.page-view-actions { margin-left:0; } }
