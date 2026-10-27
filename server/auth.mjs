@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { uid, now, parse } from './db.mjs';
 import { setupHarnessAuth } from './harness-auth.mjs';
+import { setupHarnessSso } from './harness-sso.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
@@ -30,6 +31,7 @@ export function setupAuth(app, store, config) {
     for (const [key, value] of documentTokens) if (value.expires <= Date.now()) documentTokens.delete(key);
     res.cookie(sessionName, token, { ...cookies, maxAge: 8 * 3600000 });
   };
+  const harnessSso = setupHarnessSso(app, store, config, getUser);
   app.use('/api', (req, res, next) => {
     req.user = getUser(req);
     if (req.harnessAuthenticated) return next();
@@ -63,7 +65,11 @@ export function setupAuth(app, store, config) {
     run('DELETE FROM oauth_states WHERE expires<?', Date.now());
     const origin = requestOrigin(req);
     const requirementId = typeof req.query.requirement === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.query.requirement) ? req.query.requirement : '';
-    const returnPath = requirementId ? '/?' + new URLSearchParams({ view: 'requirements', requirement: requirementId }) : '/';
+    let returnPath = requirementId ? '/?' + new URLSearchParams({ view: 'requirements', requirement: requirementId }) : '/';
+    if (req.query.harness_request !== undefined) {
+      try { returnPath = harnessSso.returnPath(req.query.harness_request); }
+      catch { return res.status(400).json({ error: 'Harness 登录请求无效，请重新登录' }); }
+    }
     run('INSERT INTO oauth_states(state,verifier,expires,origin,return_path) VALUES(?,?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin, returnPath);
     res.cookie(oauthName, state, { ...cookies, maxAge: 600000 });
     const url = new URL('https://accounts.feishu.cn/open-apis/authen/v1/authorize');

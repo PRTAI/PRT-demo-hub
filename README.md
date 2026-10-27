@@ -97,3 +97,11 @@ compose.production.yaml  企业正式环境：独立配置和数据卷
 `POST /api/harness/exchange` 校验短时 HMAC 身份凭据、应用、租户和一次性 nonce，按同一应用的 `open_id` 匹配现有已授权用户，返回 30 分钟的限定范围令牌。请求仍执行现有角色、需求分配和文件权限；禁用账号立即失效。令牌只允许需求查询/附件、Demo 草稿创建和文件上传等接口，不能管理用户或执行审核发布。生产环境不会因 Harness 登录自动授予平台权限。
 
 本地使用 `DEMO_MODE=true`、回环地址和独立数据目录；配置共享密钥后会生成与 Harness 开发鉴权匹配的两位测试用户及两个已分配需求。设置 `APP_ORIGIN=http://127.0.0.1:3100`、`PORT=3100`，运行 `npm ci`、`npm run build`、`npm start`，打开同一地址体验；`npm run dev` 的前端使用 5173。
+
+## 作为 Harness 的统一登录入口
+
+中心设置 `PRT_AUTH_MODE=demohub`，飞书 App ID、App Secret 和企业租户只保存在本平台。平台配置 `HARNESS_SERVER_URL=http://中心公网IP:8082`，以及与中心 `PRT_DATAHUB_SECRET` 相同的 `HARNESS_SHARED_SECRET`；容器部署文件已将这两个变量传入服务。中心 `PRT_DATAHUB_URL` 必须是浏览器与中心容器均可访问的 Demo Hub 地址。
+
+访问中心登录时，浏览器进入本平台已有的飞书登录流程。已登录本平台的用户直接返回中心；未登录者完成飞书授权后继续返回。飞书开放平台只需要保留本平台自己的 `/api/auth/callback` 回调，中心的 `/auth/demohub/callback` 由本平台按 `HARNESS_SERVER_URL` 精确校验，无需登记到飞书。
+
+短时签名请求只允许回到指定中心，返回的登录码 60 秒有效、只能使用一次且必须携带匹配的 PKCE verifier 兑换。停用、删除或没有平台角色的账号不能登录中心。中心首次创建用户时，将本平台 `admin` 初始化为中心管理员，其他已授权角色初始化为成员；后续中心自身的角色与启停仍由中心管理员管理。授权码和会话不包含飞书 App Secret 或飞书访问令牌。
