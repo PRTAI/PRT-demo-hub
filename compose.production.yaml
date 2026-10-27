@@ -19,6 +19,8 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:?Set the application origin}
       PUBLIC_APP_ORIGIN: ${PUBLIC_APP_ORIGIN:-http://data.prt-ai.cn:8001}
       INTRANET_APP_ORIGIN: ${INTRANET_APP_ORIGIN:-http://192.168.110.25:8001}
+      HARNESS_SHARED_SECRET: ${HARNESS_SHARED_SECRET:-}
+      HARNESS_SERVER_URL: ${HARNESS_SERVER_URL:-}
       FEISHU_APP_ID: ${FEISHU_APP_ID:?Set the Feishu application ID}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?Set the Feishu application secret}
       FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Set the allowed enterprise tenant key}

@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { uid, now, parse } from './db.mjs';
 import { platformPath } from '../shared/platform-links.mjs';
+import { setupHarnessAuth } from './harness-auth.mjs';
+import { setupHarnessSso } from './harness-sso.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
@@ -15,7 +17,10 @@ export function setupAuth(app, store, config) {
   const origins = [...new Set([config.origin, config.publicOrigin, config.intranetOrigin].filter(Boolean))];
   const requestOrigin = req => origins.find(origin => new URL(origin).host === req.get('host')) || config.origin;
   const documentTokens = new Map();
+  const harness = setupHarnessAuth(app, store, config);
   const getUser = req => {
+    const delegated = harness.user(req);
+    if (delegated) return delegated;
     const token = req.cookies[sessionName];
     return token ? one('SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?', hash(token), Date.now()) : null;
   };
@@ -27,8 +32,10 @@ export function setupAuth(app, store, config) {
     for (const [key, value] of documentTokens) if (value.expires <= Date.now()) documentTokens.delete(key);
     res.cookie(sessionName, token, { ...cookies, maxAge: 8 * 3600000 });
   };
+  const harnessSso = setupHarnessSso(app, store, config, getUser);
   app.use('/api', (req, res, next) => {
     req.user = getUser(req);
+    if (req.harnessAuthenticated) return next();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       const origin = req.get('origin');
       if (!origins.includes(origin) || req.get('x-requested-with') !== 'PRT') return res.status(403).json({ error: '请求来源校验失败，请刷新页面后重试' });
@@ -39,11 +46,11 @@ export function setupAuth(app, store, config) {
   app.get('/api/auth/me', (req, res) => res.json({ user: publicUser(req.user), csrf: req.user?.csrf || '', demoMode: config.demoMode, feishuConfigured: !!(config.appId && config.appSecret && config.tenantKey) }));
   app.get('/api/auth/demo-users', (req, res) => {
     if (!config.demoMode) return res.sendStatus(404);
-    res.json(all("SELECT * FROM users WHERE open_id LIKE 'preview:%' AND enabled=1").map(publicUser));
+    res.json(all("SELECT * FROM users WHERE (open_id LIKE 'preview:%' OR id IN ('harness-preview-member','harness-preview-admin')) AND enabled=1").map(publicUser));
   });
   app.post('/api/auth/demo-login', (req, res) => {
     if (!config.demoMode) return res.sendStatus(404);
-    const user = one("SELECT * FROM users WHERE id=? AND open_id LIKE 'preview:%' AND enabled=1", req.body.userId || '');
+    const user = one("SELECT * FROM users WHERE id=? AND (open_id LIKE 'preview:%' OR id IN ('harness-preview-member','harness-preview-admin')) AND enabled=1", req.body.userId || '');
     if (!user) return res.status(400).json({ error: '演示账号不存在' });
     if (req.cookies[sessionName]) run('DELETE FROM sessions WHERE token=?', hash(req.cookies[sessionName]));
     issue(res, user); res.json({ ok: true });
@@ -58,7 +65,12 @@ export function setupAuth(app, store, config) {
     const state = secret(), verifier = secret();
     run('DELETE FROM oauth_states WHERE expires<?', Date.now());
     const origin = requestOrigin(req);
-    const returnPath = platformPath({ requirementId: typeof req.query.requirement === 'string' ? req.query.requirement : '', demoId: typeof req.query.demo === 'string' ? req.query.demo : '' });
+    const requirementId = typeof req.query.requirement === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.query.requirement) ? req.query.requirement : '';
+    let returnPath = requirementId ? '/?' + new URLSearchParams({ view: 'requirements', requirement: requirementId }) : '/';
+    if (req.query.harness_request !== undefined) {
+      try { returnPath = harnessSso.returnPath(req.query.harness_request); }
+      catch { return res.status(400).json({ error: 'Harness 登录请求无效，请重新登录' }); }
+    }
     run('INSERT INTO oauth_states(state,verifier,expires,origin,return_path) VALUES(?,?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin, returnPath);
     res.cookie(oauthName, state, { ...cookies, maxAge: 600000 });
     const url = new URL('https://accounts.feishu.cn/open-apis/authen/v1/authorize');
