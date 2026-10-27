@@ -53,6 +53,25 @@ test('Harness reuses Demo Hub Feishu login and exchanges a one-use, PKCE-bound c
   assert.equal(new URL(reused.headers.location).origin, 'http://203.0.113.10:8082');
 });
 
+test('signed Harness login keeps its return route when requirement and Demo parameters are present and rejects invalid assertions', async t => {
+  const { app, store } = fixture(t), agent = request.agent(app);
+  const id = '00000000-0000-4000-8000-000000000001';
+  const assertion = sign('prt-demo-hub-login', { state: randomBytes(32).toString('base64url'), challenge: hash('verifier') });
+  const begin = await agent.get('/api/auth/feishu').query({ harness_request: assertion, requirement: id, demo: id }).expect(302);
+  const state = new URL(begin.headers.location).searchParams.get('state');
+  const logged = await agent.get('/api/auth/callback').query({ state, code: 'synthetic' }).expect(302);
+  const target = new URL(logged.headers.location, 'http://127.0.0.1:3100');
+  assert.equal(target.pathname, '/api/harness/authorize');
+  assert.equal(target.searchParams.get('request'), assertion);
+  assert.equal(target.searchParams.get('requirement'), null);
+  assert.equal(target.searchParams.get('demo'), null);
+  const before = store.one('SELECT COUNT(*) AS total FROM oauth_states').total;
+  for (const invalid of ['forged', [assertion, assertion]]) {
+    await agent.get('/api/auth/feishu').query({ harness_request: invalid, requirement: id, demo: id }).expect(400);
+  }
+  assert.equal(store.one('SELECT COUNT(*) AS total FROM oauth_states').total, before);
+});
+
 test('SSO rejects forged requests, unapproved callbacks, expiry and disabled users', async t => {
   const ctx = fixture(t), state = randomBytes(32).toString('base64url'), challenge = hash('verifier');
   for (const patch of [{ redirectUri: 'https://evil.example/callback' }, { exp: Date.now() - 1 }, { state: 'bad' }, { challenge: 'bad' }]) {

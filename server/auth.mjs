@@ -65,8 +65,7 @@ export function setupAuth(app, store, config) {
     const state = secret(), verifier = secret();
     run('DELETE FROM oauth_states WHERE expires<?', Date.now());
     const origin = requestOrigin(req);
-    const requirementId = typeof req.query.requirement === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.query.requirement) ? req.query.requirement : '';
-    let returnPath = requirementId ? '/?' + new URLSearchParams({ view: 'requirements', requirement: requirementId }) : '/';
+    let returnPath = platformPath({ requirementId: typeof req.query.requirement === 'string' ? req.query.requirement : '', demoId: typeof req.query.demo === 'string' ? req.query.demo : '' });
     if (req.query.harness_request !== undefined) {
       try { returnPath = harnessSso.returnPath(req.query.harness_request); }
       catch { return res.status(400).json({ error: 'Harness 登录请求无效，请重新登录' }); }
