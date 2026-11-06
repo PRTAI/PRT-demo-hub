@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { parse } from './db.mjs';
+import { superiorRequirementFilter } from './requirement-access.mjs';
 
 const querySchema = z.object({
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(5).max(100).default(10),
@@ -17,11 +18,13 @@ export function queryCatalog(store, user, input) {
   if (canOwn) { access.push('a.owner_id=?'); accessArgs.push(user.id); }
   if (manager) { access.push('EXISTS(SELECT 1 FROM versions rv WHERE rv.asset_id=a.id AND rv.reviewer_id=?)'); accessArgs.push(user.id); }
   access.push('EXISTS(SELECT 1 FROM asset_permissions ap WHERE ap.asset_id=a.id AND ap.user_id=?)'); accessArgs.push(user.id);
+  const inherited = superiorRequirementFilter(user, { asset: 'a.id' });
+  access.push(inherited.sql); accessArgs.push(...inherited.args);
   if (roles.includes('pm') || roles.includes('business')) access.push('1=1');
   conditions.push(`(${access.length ? access.join(' OR ') : '0=1'})`); args.push(...accessArgs);
   if (query.scope === 'mine') { conditions.push('a.owner_id=?'); args.push(user.id); }
   if (['team', 'reviews'].includes(query.scope)) {
-    conditions.push(manager ? '(a.owner_id=? OR EXISTS(SELECT 1 FROM versions rv WHERE rv.asset_id=a.id AND rv.reviewer_id=?))' : '0=1'); if (manager) args.push(user.id, user.id);
+    conditions.push(manager ? `(a.owner_id=? OR EXISTS(SELECT 1 FROM versions rv WHERE rv.asset_id=a.id AND rv.reviewer_id=?)${query.scope === 'team' ? ` OR ${inherited.sql}` : ''})` : '0=1'); if (manager) args.push(user.id, user.id, ...(query.scope === 'team' ? inherited.args : []));
   }
   if (query.scope === 'reviews') conditions.push("v.status='pending'");
   const baseWhere = conditions.join(' AND '), baseArgs = [...args];

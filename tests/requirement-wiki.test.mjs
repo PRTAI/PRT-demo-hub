@@ -6,7 +6,6 @@ import path from 'node:path';
 import { openStore, uid, now } from '../server/db.mjs';
 import { seedPreview } from '../server/seed.mjs';
 import { createRequirementWiki } from '../server/requirement-wiki.mjs';
-import { createRequirementExports } from '../server/requirement-export.mjs';
 
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-wiki-test-'));
@@ -27,7 +26,7 @@ function fixture(t, options = {}) {
     const response = data => ({ ok: true, json: async () => ({ code: 0, data }) });
     if (url.pathname.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'token_mock', expire: 7200 }) };
     assert.equal(options.headers.Authorization, 'Bearer token_mock');
-    if (ctx.controls.apiError) return { ok: false, status: 403, json: async () => ({ code: 99991672, msg: 'sensitive secret_mock data' }) };
+    if (ctx.controls.apiError && (!ctx.controls.errorAt || url.pathname.includes(ctx.controls.errorAt))) return { ok: false, status: 403, json: async () => ({ code: 99991672, msg: 'sensitive secret_mock data', error: { permission_violations: [{ subject: 'wiki:wiki secret_mock https://evil.example' }] } }) };
     if (url.pathname.endsWith('/spaces/get_node')) {
       assert.equal(url.searchParams.get('token'), 'SampleToken');
       return response({ node: { space_id: 'Space123', node_token: 'SampleToken', parent_node_token: ctx.controls.rootSample ? '' : 'ParentToken' } });
@@ -111,6 +110,20 @@ test('wiki creates a separate sibling document with only the requirement name an
   const count = ctx.calls.length; await ctx.wiki.drain(); assert.equal(ctx.calls.length, count);
 });
 
+test('requirement status is updated in the managed collaboration section and a failed sync retries the latest value in the same document', async t => {
+  const ctx = fixture(t);
+  ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
+  assert.match(ctx.documentText(), /状态：进行中/);
+  ctx.store.run("UPDATE requirements SET status='delivered' WHERE id=?", ctx.id);
+  ctx.controls.apiError = true; ctx.controls.errorAt = '/blocks/';
+  ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
+  assert.equal(ctx.wiki.info(ctx.id).status, 'failed'); assert.match(ctx.documentText(), /状态：进行中/);
+  ctx.controls.apiError = false;
+  ctx.wiki.retry(ctx.id); await ctx.wiki.drain();
+  assert.equal(ctx.wiki.info(ctx.id).status, 'synced'); assert.match(ctx.documentText(), /状态：已交付/);
+  assert.equal(ctx.nodes.length, 1); assert.equal(ctx.blocks.size, 4);
+});
+
 test('wiki recovers lost node and block responses after SQLite reopens without creating duplicate documents or sections', async t => {
   const ctx = fixture(t); ctx.wiki.enqueue(ctx.id); ctx.controls.loseCreate = 1;
   await ctx.wiki.drain(); assert.equal(ctx.nodes.length, 1); assert.equal(ctx.job().node_token, '');
@@ -152,6 +165,22 @@ test('wiki failures retry independently with saved IDs and safe errors, while la
   assert.equal(ctx.wiki.retry(ctx.id), true); await ctx.wiki.drain(); assert.equal(ctx.nodes.length, 1);
 });
 
+test('missing application permissions identify the failing operation, stop futile automatic retries and resume the same document after authorization', async t => {
+  const ctx = fixture(t); ctx.controls.apiError = true;
+  ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
+  assert.equal(ctx.job().status, 'failed'); assert.equal(ctx.job().attempts, 1);
+  assert.match(ctx.job().error, /99991672.*读取 sample 知识库节点.*应用身份.*wiki:wiki/);
+  assert.ok(!ctx.job().error.includes('secret_mock')); assert.ok(!ctx.job().error.includes('evil.example'));
+  const requests = ctx.calls.length; ctx.ready(); await ctx.wiki.drain(); assert.equal(ctx.calls.length, requests);
+  ctx.controls.apiError = false; ctx.wiki.retry(ctx.id); await ctx.wiki.drain();
+  assert.equal(ctx.job().status, 'synced'); assert.equal(ctx.nodes.length, 1);
+  ctx.controls.apiError = true; ctx.controls.errorAt = '/members'; ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
+  assert.equal(ctx.job().status, 'failed'); assert.match(ctx.job().error, /读取文档协作者缺少应用身份/);
+  assert.equal(ctx.nodes.length, 1);
+  ctx.controls.apiError = false; ctx.wiki.retry(ctx.id); await ctx.wiki.drain();
+  assert.equal(ctx.job().status, 'synced'); assert.equal(ctx.nodes.length, 1);
+});
+
 test('wiki preserves a pending generation when a requirement changes during document synchronization', async t => {
   const ctx = fixture(t); ctx.wiki.enqueue(ctx.id);
   let changed = false;
@@ -172,15 +201,15 @@ test('wiki validates its configured sample and skips all external writes in prev
   assert.equal(ctx.job().status, 'synced'); assert.equal(ctx.nodes[0].parent_node_token, undefined);
 });
 
-test('wiki automatically copies the five saved Demo description sections and keeps manual blocks when descriptions change', async t => {
+test('wiki automatically copies saved Demo description and volume and keeps manual blocks when descriptions change', async t => {
   const ctx = fixture(t);
   ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
-  const demo = ctx.demo({ title: '负责人上传样例', summary: '简介内容', content: '# 数据概述\n概述甲\n# 数据格式\n格式甲', costEstimate: '成本甲', difficulty: '难度甲', notes: '注意甲' });
+  const demo = ctx.demo({ title: '负责人上传样例', summary: '简介内容', content: '# 数据概述\n概述甲\n# 数据格式\n格式甲', dataVolume: '两周产量甲', costEstimate: '成本甲', difficulty: '难度甲', notes: '注意甲' });
   ctx.blocks.set('ManualDemo', { block_type: 2, text: { elements: [{ text_run: { content: '人工补充：请保留' } }] } });
   ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   assert.equal(ctx.wiki.info(ctx.id).status, 'synced'); assert.equal(ctx.nodes.length, 1);
   let content = ctx.documentText();
-  for (const value of ['负责人上传样例', 'V1 · 草稿', '数据概述', '概述甲', '数据格式', '格式甲', '成本预估', '成本甲', '难度说明', '难度甲', '注意事项', '注意甲', '人工补充：请保留']) assert.ok(content.includes(value), value);
+  for (const value of ['负责人上传样例', 'V1 · 草稿', '数据概述', '概述甲', '数据格式', '格式甲', '数据量级', '两周产量甲', '成本预估', '成本甲', '难度说明', '难度甲', '注意事项', '注意甲', '人工补充：请保留']) assert.ok(content.includes(value), value);
   const links = [...ctx.blocks.values()].flatMap(block => block.text?.elements || []).map(element => element.text_run.text_element_style?.link?.url).filter(Boolean);
   assert.ok(links.includes('http://data.prt-ai.cn:8001/?demo=' + demo.id));
   const blockCount = ctx.blocks.size;
@@ -188,7 +217,7 @@ test('wiki automatically copies the five saved Demo description sections and kee
   ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   content = ctx.documentText(); assert.equal(ctx.blocks.size, blockCount);
   for (const value of ['新名称', '概述乙', '格式乙', '成本乙', '难度乙', '人工补充：请保留']) assert.ok(content.includes(value), value);
-  for (const value of ['概述甲', '格式甲', '成本甲', '难度甲', '注意甲', '简介内容']) assert.ok(!content.includes(value), value);
+  for (const value of ['概述甲', '格式甲', '两周产量甲', '数据量级', '成本甲', '难度甲', '注意甲', '简介内容']) assert.ok(!content.includes(value), value);
   const before = ctx.calls.length; ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   assert.ok(!ctx.calls.slice(before).some(call => call.url.pathname.includes('/blocks/')));
 });
@@ -243,22 +272,21 @@ test('wiki splits long saved descriptions into API-sized blocks and batches whil
   assert.ok(ctx.documentText().includes('长说明 Demo 9'));
 });
 
-test('export preparation creates the missing historical wiki, copies saved Demo sections and later refreshes the same document', async t => {
-  const ctx = fixture(t), exports = createRequirementExports(ctx.store, ctx.wiki);
+test('explicit wiki preparation creates historical collaboration documents and later refreshes the same document', async t => {
+  const ctx = fixture(t);
   const demo = ctx.demo({ title: '旧数据 Demo', content: '# 数据概述\n旧数据概述\n# 数据格式\n旧数据格式', costEstimate: '旧数据成本', difficulty: '旧数据难度', notes: '旧数据注意事项' });
-  const selected = [{ id: ctx.id, title: '历史需求', rows: [{ title: '需求快照', deadlineDate: '', demoName: '旧数据 Demo', associatedPeople: '负责人', documentUrl: '' }] }];
   assert.equal(ctx.wiki.info(ctx.id).status, 'not_created'); assert.equal(ctx.wiki.configurationError(), '');
-  const job = exports.create('preview-pm', { status: 'open' }, selected);
-  assert.equal(job.status, 'pending'); assert.equal(ctx.calls.length, 0);
+  ctx.wiki.prepareExport(ctx.id);
+  assert.equal(ctx.wiki.info(ctx.id).status, 'pending'); assert.equal(ctx.calls.length, 0);
   await ctx.wiki.drain();
-  assert.equal(exports.status(job.id, 'preview-pm').status, 'ready');
-  assert.equal(exports.rows(job.id, 'preview-pm')[0].documentUrl, 'https://team.feishu.cn/wiki/Wiki1');
+  assert.equal(ctx.wiki.info(ctx.id).status, 'synced');
+  assert.equal(ctx.wiki.info(ctx.id).url, 'https://team.feishu.cn/wiki/Wiki1');
   for (const value of ['旧数据概述', '旧数据格式', '旧数据成本', '旧数据难度', '旧数据注意事项']) assert.ok(ctx.documentText().includes(value));
   const blockCount = ctx.blocks.size;
   ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '旧数据 Demo', content: '# 数据概述\n更新概述\n# 数据格式\n更新格式', costEstimate: '更新成本', difficulty: '更新难度', notes: '更新注意事项' }), demo.versionId);
-  const again = exports.create('preview-pm', { status: 'open' }, selected);
+  ctx.wiki.prepareExport(ctx.id);
   await ctx.wiki.drain();
-  assert.equal(exports.status(again.id, 'preview-pm').status, 'ready');
+  assert.equal(ctx.wiki.info(ctx.id).status, 'synced');
   assert.equal(ctx.nodes.length, 1); assert.equal(ctx.blocks.size, blockCount);
   for (const value of ['更新概述', '更新格式', '更新成本', '更新难度', '更新注意事项']) assert.ok(ctx.documentText().includes(value));
   assert.ok(!ctx.documentText().includes('旧数据注意事项'));

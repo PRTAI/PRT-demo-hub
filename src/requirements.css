@@ -68,6 +68,14 @@
 .requirement-content{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.9;color:#5f6e56;margin-bottom:25px}
 .requirement-row{display:flex;align-items:center;justify-content:space-between;gap:20px;width:100%;padding:24px;text-align:left;border-top:1px solid #edf0e8}
 .requirement-row:hover{background:#fafcf7}
+.requirement-row.requirement-returning{background:#f0f6df;box-shadow:inset 4px 0 #85a35c;outline:1px solid #c6d7a9;outline-offset:-1px}
+.requirement-row.requirement-closed{background:#f1f2f3;border-color:#d8dbdf;filter:grayscale(1)}
+.requirement-row.requirement-closed:hover{background:#e9ebed;border-color:#c4c9cf}
+.requirement-row.requirement-closed.requirement-returning{background:#e9ebed;box-shadow:inset 4px 0 #7b858f;outline-color:#b5bbc1}
+.requirement-row.requirement-closed .requirement-title strong{color:#525960}
+.requirement-closed .requirement-status{background:#dfe2e5;color:#555d65}
+.requirement-row.requirement-closed :is(.requirement-list-main>p,.requirement-list-meta,.requirement-count,.requirement-responsible,.requirement-wiki-link){color:#646c74}
+.requirement-row.requirement-closed:focus-within{outline:2px solid #7b858f;outline-offset:-2px}
 .requirement-row .requirement-title{text-align:left}
 .requirement-row .requirement-title:hover strong{color:#245a46}
 .requirement-list-main{min-width:0}
@@ -127,6 +135,9 @@
 .requirement-documents{margin-bottom:30px}
 .requirement-documents .panel-title h2{display:flex;align-items:center;gap:8px}
 .requirement-document-list{display:flex;flex-direction:column}
+.requirement-document-row{display:flex;align-items:center;gap:10px;min-width:0;padding-right:24px;border-top:1px solid #e9eee2}
+.requirement-document-row>.requirement-document{flex:1;min-width:0;border-top:0}
+.requirement-document-row>.button{flex:none}
 .requirement-document{display:flex;align-items:center;gap:10px;padding:14px 24px;border-top:1px solid #e9eee2;color:#647b51;text-decoration:none}
 .requirement-document:hover{background:#f8fbf4}
 .requirement-document>span{display:flex;flex-direction:column;flex:1;min-width:0;font-size:13px;overflow-wrap:anywhere}
@@ -166,3 +177,11 @@
 .requirement-document-dropzone.dragging,.requirement-document-dropzone:focus-visible { background:#eaf4e2; border-color:#648947; box-shadow:0 0 0 4px #73985818; outline:none; }
 .requirement-document-dropzone:disabled { opacity:.6; cursor:wait; }
 .requirement-list-main>.share-link { display:inline-flex; margin:10px 0 0 10px; }
+
+.requirement-personal-export { padding:16px 0; border-bottom:1px solid #e5ebdf; margin-bottom:16px; }
+.requirement-personal-export p { font-size:13px; line-height:1.8; overflow-wrap:anywhere; }
+.requirement-personal-export .button.small { margin:0 8px; }
+.requirement-card-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; flex-shrink: 0; }
+@media (max-width: 700px) {
+  .requirement-card-actions { width: 100%; flex-direction: row; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+}

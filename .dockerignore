@@ -10,6 +10,9 @@ backups
 test-results
 host-data
 .host-runtime
+ops-backups
+.ops-workspace
+prt-ops-source.json
 *.log
 .DS_Store
 Thumbs.db
@@ -22,3 +25,6 @@ coverage
 *.db
 *.db-wal
 *.db-shm
+# Keep metadata available for the source snapshot copied by both Dockerfiles.
+!/.gitignore
+!/.dockerignore

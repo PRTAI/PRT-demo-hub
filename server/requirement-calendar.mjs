@@ -1,4 +1,4 @@
-import { uid, now } from './db.mjs';
+import { uid, now, parse } from './db.mjs';
 import { feishuRequirementLink } from './notifications.mjs';
 import { requirementDate, nextRequirementDate } from '../shared/requirement-schedule.mjs';
 import { splitRequirementOwners } from '../shared/requirement-owners.mjs';
@@ -13,14 +13,30 @@ export function createRequirementCalendar(store, config, notifications) {
     generation INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
     next_at INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, synced_at TEXT
   ); CREATE INDEX IF NOT EXISTS requirement_calendar_pending ON requirement_calendar(status,next_at);`);
+  const columns = all('PRAGMA table_info(requirement_calendar)').map(column => column.name);
+  for (const [name, definition] of [['delete_pending', 'INTEGER NOT NULL DEFAULT 0'], ['notification_round', 'INTEGER NOT NULL DEFAULT 0'], ['creating_event', "TEXT NOT NULL DEFAULT ''"]]) {
+    if (!columns.includes(name)) store.db.exec(`ALTER TABLE requirement_calendar ADD COLUMN ${name} ${definition}`);
+  }
   function enqueue(id) {
-    run(`INSERT INTO requirement_calendar(requirement_id,event_key,updated_at) VALUES(?,?,?)
-      ON CONFLICT(requirement_id) DO UPDATE SET generation=generation+1,status='pending',attempts=0,next_at=0,error='',updated_at=excluded.updated_at`, id, uid(), now());
+    const requirement = one('SELECT status,calendar_ready,deleted_at FROM requirements WHERE id=?', id);
+    if (!requirement) return;
+    const closed = requirement.status === 'closed' || !!requirement.deleted_at, deferred = !requirement.calendar_ready;
+    if (closed || deferred) {
+      run("UPDATE notifications SET status='skipped',error=? WHERE requirement_id=? AND kind='requirement_calendar' AND status IN ('pending','failed')", closed ? '需求已关闭，取消旧日程消息' : '需求尚未补充，暂不创建日程', id);
+      if (deferred && !one("SELECT 1 FROM requirement_calendar WHERE requirement_id=? AND (event_id<>'' OR creating_event<>'')", id)) {
+        run('DELETE FROM requirement_calendar WHERE requirement_id=?', id);
+        return;
+      }
+      if (one("SELECT 1 FROM requirement_calendar WHERE requirement_id=? AND status='deleted' AND event_id='' AND creating_event=''", id)) return;
+    }
+    run(`INSERT INTO requirement_calendar(requirement_id,event_key,delete_pending,updated_at) VALUES(?,?,?,?)
+      ON CONFLICT(requirement_id) DO UPDATE SET generation=generation+1,status='pending',attempts=0,next_at=0,error='',delete_pending=MAX(delete_pending,excluded.delete_pending),updated_at=excluded.updated_at`, id, uid(), closed || deferred ? 1 : 0, now());
   }
   tx(() => {
-    const refreshLayout = one("SELECT value FROM metadata WHERE key='requirement_calendar_fields_version'")?.value !== '2';
+    const refreshLayout = one("SELECT value FROM metadata WHERE key='requirement_calendar_fields_version'")?.value !== '3';
     for (const requirement of all(refreshLayout ? 'SELECT id FROM requirements' : 'SELECT id FROM requirements WHERE id NOT IN (SELECT requirement_id FROM requirement_calendar)')) enqueue(requirement.id);
-    run("INSERT OR REPLACE INTO metadata(key,value) VALUES('requirement_calendar_fields_version','2')");
+    for (const requirement of all('SELECT r.id FROM requirements r JOIN requirement_calendar c ON c.requirement_id=r.id WHERE r.calendar_ready=0')) enqueue(requirement.id);
+    run("INSERT OR REPLACE INTO metadata(key,value) VALUES('requirement_calendar_fields_version','3')");
   });
   const participants = id => all(`SELECT u.* FROM users u WHERE u.enabled=1 AND u.deleted_at IS NULL AND
     (u.id=(SELECT publisher_id FROM requirements WHERE id=?) OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=? AND ra.user_id=u.id)) ORDER BY u.name,u.id`, id, id).filter(user => !user.open_id.startsWith('preview:'));
@@ -28,10 +44,13 @@ export function createRequirementCalendar(store, config, notifications) {
     for (const requirement of all('SELECT id FROM requirements r WHERE publisher_id=? OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=r.id AND ra.user_id=?)', userId, userId)) enqueue(requirement.id);
   }
   function info(id) {
-    const job = one('SELECT status,error,app_link,synced_at FROM requirement_calendar WHERE requirement_id=?', id);
-    return job ? { status: job.status, error: job.error, appLink: safeAppLink(job.app_link), syncedAt: job.synced_at, messages: notifications.requirementCalendarSummary(id) } : null;
+    const job = one('SELECT status,error,app_link,synced_at,delete_pending FROM requirement_calendar WHERE requirement_id=?', id);
+    const requirement = one('SELECT status,calendar_ready,deleted_at FROM requirements WHERE id=?', id);
+    if (requirement?.deleted_at) return null;
+    if (!requirement?.calendar_ready && !job?.delete_pending) return null;
+    return job ? { status: job.status, deleting: !!job.delete_pending, error: job.error, appLink: requirement.status === 'closed' || !requirement.calendar_ready || job.delete_pending || job.status === 'deleted' ? '' : safeAppLink(job.app_link), syncedAt: job.synced_at, messages: notifications.requirementCalendarSummary(id) } : null;
   }
-  const list = () => all('SELECT c.*,r.title FROM requirement_calendar c JOIN requirements r ON r.id=c.requirement_id ORDER BY c.updated_at DESC LIMIT 100').map(job => ({ ...job, app_link: safeAppLink(job.app_link) }));
+  const list = () => all('SELECT c.*,r.title,r.status AS requirement_status,r.deleted_at AS requirement_deleted_at FROM requirement_calendar c JOIN requirements r ON r.id=c.requirement_id ORDER BY c.updated_at DESC LIMIT 100').map(job => ({ ...job, app_link: job.requirement_status === 'closed' || job.requirement_deleted_at || job.delete_pending ? '' : safeAppLink(job.app_link) }));
   function retry(id) {
     return run("UPDATE requirement_calendar SET status='pending',attempts=0,next_at=0,error='',updated_at=? WHERE requirement_id=? AND status='failed'", now(), id).changes > 0;
   }
@@ -50,6 +69,7 @@ export function createRequirementCalendar(store, config, notifications) {
     const bearer = await tokenFor();
     const response = await call('https://open.feishu.cn/open-apis/calendar/v4/' + resource, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(15000), ...(body ? { body: JSON.stringify(body) } : {}) });
     const data = await response.json();
+    if (method === 'DELETE' && [193001, 193003].includes(data.code)) return {}; // Already absent: safe to finish a retried deletion.
     if (!response.ok || data.code !== 0) {
       token = '';
       if (data.code === 99991672) throw new Error('飞书应用缺少日历接口权限 (99991672)，请应用管理员在飞书开放平台开通对应的应用身份权限并发布新版本，再重试同步');
@@ -86,14 +106,40 @@ export function createRequirementCalendar(store, config, notifications) {
   async function sync(job) {
     const requirement = one('SELECT * FROM requirements WHERE id=?', job.requirement_id);
     if (!requirement) return;
+    if (job.delete_pending || requirement.deleted_at || requirement.status === 'closed' || !requirement.calendar_ready) {
+      let eventId = job.event_id;
+      // A previous create may have succeeded even if its response was lost.
+      // Resolve that same idempotent request before deleting, never leave an orphan.
+      if (!eventId && job.creating_event) {
+        const calendarId = await calendarFor(job);
+        const data = await request('calendars/' + encodeURIComponent(calendarId) + '/events?' + new URLSearchParams({ idempotency_key: job.event_key, user_id_type: 'open_id' }), 'POST', parse(job.creating_event));
+        eventId = data.event?.event_id;
+        if (!eventId) throw new Error('飞书未返回待删除的日程 ID，请重试');
+        run('UPDATE requirement_calendar SET event_id=?,creating_event=? WHERE requirement_id=?', eventId, '', requirement.id);
+        job.calendar_id = calendarId;
+      }
+      if (eventId) await request('calendars/' + encodeURIComponent(job.calendar_id) + '/events/' + encodeURIComponent(eventId) + '?need_notification=true', 'DELETE');
+      tx(() => {
+        const current = one('SELECT status,calendar_ready,deleted_at FROM requirements WHERE id=?', requirement.id);
+        run(`UPDATE requirement_calendar SET event_id='',app_link='',creating_event='',delete_pending=0,event_key=?,notification_round=notification_round+1,
+          status=?,attempts=0,next_at=0,error='',synced_at=NULL,updated_at=? WHERE requirement_id=? AND event_key=?`, uid(), current.deleted_at || current.status === 'closed' || !current.calendar_ready ? 'deleted' : 'pending', now(), requirement.id, job.event_key);
+      });
+      return;
+    }
+    const changed = () => one('SELECT generation FROM requirement_calendar WHERE requirement_id=?', requirement.id)?.generation !== job.generation;
+    if (changed()) return;
     const calendarId = await calendarFor(job), root = 'calendars/' + encodeURIComponent(calendarId) + '/events';
+    if (changed()) return;
     let eventId = job.event_id;
     if (!eventId) {
-      const data = await request(root + '?' + new URLSearchParams({ idempotency_key: job.event_key, user_id_type: 'open_id' }), 'POST', eventData(requirement));
+      const payload = job.creating_event ? parse(job.creating_event) : eventData(requirement);
+      run('UPDATE requirement_calendar SET creating_event=? WHERE requirement_id=?', JSON.stringify(payload), requirement.id);
+      const data = await request(root + '?' + new URLSearchParams({ idempotency_key: job.event_key, user_id_type: 'open_id' }), 'POST', payload);
       eventId = data.event?.event_id;
       if (!eventId) throw new Error('飞书创建日程未返回日程 ID');
-      run('UPDATE requirement_calendar SET event_id=?,app_link=? WHERE requirement_id=?', eventId, safeAppLink(data.event.app_link), requirement.id);
+      run("UPDATE requirement_calendar SET event_id=?,app_link=?,creating_event='' WHERE requirement_id=?", eventId, safeAppLink(data.event.app_link), requirement.id);
     }
+    if (changed()) return;
     const eventRoot = root + '/' + encodeURIComponent(eventId), existing = [];
     let pageToken = '';
     do {
@@ -103,11 +149,14 @@ export function createRequirementCalendar(store, config, notifications) {
       if (data.has_more && (!data.page_token || data.page_token === pageToken)) throw new Error('飞书日程参与人分页异常，请稍后重试');
       pageToken = data.has_more ? data.page_token : '';
     } while (pageToken);
+    if (changed()) return;
     const desired = participants(requirement.id), desiredIds = new Set(desired.map(user => user.open_id));
     const removed = existing.filter(attendee => attendee.type === 'user' && !attendee.is_organizer && !desiredIds.has(attendee.user_id));
     for (let offset = 0; offset < removed.length; offset += 50) await request(eventRoot + '/attendees/batch_delete?user_id_type=open_id', 'POST', { attendee_ids: removed.slice(offset, offset + 50).map(attendee => attendee.attendee_id), need_notification: true });
+    if (changed()) return;
     const data = await request(eventRoot + '?user_id_type=open_id', 'PATCH', eventData(one('SELECT * FROM requirements WHERE id=?', requirement.id)));
     if (data.event?.app_link) run('UPDATE requirement_calendar SET app_link=? WHERE requirement_id=?', safeAppLink(data.event.app_link), requirement.id);
+    if (changed()) return;
     const added = participants(requirement.id).filter(user => !existing.some(attendee => attendee.user_id === user.open_id));
     for (let offset = 0; offset < added.length; offset += 50) await request(eventRoot + '/attendees?user_id_type=open_id', 'POST', { attendees: added.slice(offset, offset + 50).map(user => ({ type: 'user', user_id: user.open_id })), need_notification: true });
     tx(() => {

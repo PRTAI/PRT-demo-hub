@@ -2,7 +2,8 @@
 param(
     [string]$ProjectDirectory = '',
     [string]$BackupDirectory = 'J:\PRT-backups',
-    [string]$HealthUrl = 'http://127.0.0.1:8001/api/health'
+    [string]$HealthUrl = 'http://127.0.0.1:8001/api/health',
+    [switch]$EnableOps
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,23 +37,47 @@ $prtContainer = 'prt-datahub-production'
 $prtDataVolume = 'prt-datahub-production_production-data'
 $prtBackupVolume = 'prt-datahub-production_production-backups'
 $prtCompose = @('compose', '-f', 'compose.production.yaml', '-f', 'compose.keep-data.yaml')
+$prtServices = @('app')
 $prtBackupComplete = $false
 $prtHostBackup = $null
 Push-Location -LiteralPath $ProjectDirectory
 try {
-    foreach ($prtFile in @('.env', 'Dockerfile', 'compose.production.yaml', 'compose.keep-data.yaml', 'scripts/backup.mjs')) {
+    $prtRepairScript = Join-Path (Get-Location).Path 'scripts/repair-docker-build.ps1'
+    if (-not (Test-Path -LiteralPath $prtRepairScript -PathType Leaf)) {
+        throw 'Missing scripts/repair-docker-build.ps1. Sync the complete scripts directory before updating.'
+    }
+    & $prtRepairScript -ProjectDirectory (Get-Location).Path
+    foreach ($prtFile in @('.env', '.gitignore', '.dockerignore', 'Dockerfile', 'Dockerfile.ops', 'README.md', 'index.html', 'vite.config.mjs', 'package.json', 'package-lock.json', 'compose.production.yaml', 'compose.keep-data.yaml', 'scripts/backup.mjs')) {
         if (-not (Test-Path -LiteralPath $prtFile -PathType Leaf)) {
             throw "Required file is missing: $prtFile"
         }
+    }
+    foreach ($prtDirectory in @('server', 'shared', 'src', 'public', 'scripts', 'tests', 'docs')) {
+        if (-not (Test-Path -LiteralPath $prtDirectory -PathType Container)) { throw "Required source directory is missing: $prtDirectory" }
     }
     Get-Command docker -ErrorAction Stop | Out-Null
     Write-Host '[1/6] Checking Docker, Compose and existing data volumes...'
     Invoke-PrtDocker -DockerArguments @('version')
     Invoke-PrtDocker -DockerArguments @('volume', 'inspect', $prtDataVolume, $prtBackupVolume)
-    Invoke-PrtDocker -DockerArguments ($prtCompose + @('config', '--quiet'))
     $prtInspection = & docker inspect $prtContainer
     if ($LASTEXITCODE -ne 0) { throw 'Existing container not found. This script updates an existing deployment only.' }
     $prtExisting = @($prtInspection | ConvertFrom-Json)[0]
+    $prtProjectLabel = $prtExisting.Config.Labels.PSObject.Properties['com.docker.compose.project']
+    if ($null -eq $prtProjectLabel -or [string]::IsNullOrWhiteSpace([string]$prtProjectLabel.Value)) {
+        throw 'Existing container has no Compose project label. Check its deployment before updating.'
+    }
+    $prtCompose = @('compose', '-p', [string]$prtProjectLabel.Value, '-f', 'compose.production.yaml', '-f', 'compose.keep-data.yaml')
+    $prtConfigLabel = $prtExisting.Config.Labels.PSObject.Properties['com.docker.compose.project.config_files']
+    $prtHadOps = $null -ne $prtConfigLabel -and ([string]$prtConfigLabel.Value).Contains('compose.ops.yaml')
+    if ($EnableOps -or $prtHadOps) {
+        foreach ($prtOpsFile in @('compose.ops.yaml', 'Dockerfile.ops', 'server/ops-worker.mjs')) {
+            if (-not (Test-Path -LiteralPath $prtOpsFile -PathType Leaf)) { throw "Required operations file is missing: $prtOpsFile" }
+        }
+        $prtCompose += @('-f', 'compose.ops.yaml')
+        $prtServices += 'ops-worker'
+    }
+    Write-Host ('Using existing Compose project: ' + $prtProjectLabel.Value)
+    Invoke-PrtDocker -DockerArguments ($prtCompose + @('config', '--quiet'))
     if (-not $prtExisting.State.Running) { throw 'Start the existing container before creating the backup.' }
     foreach ($prtMount in @(
         @{ Destination = '/app/data'; Name = $prtDataVolume },
@@ -80,12 +105,15 @@ try {
     Write-Host "Backup exported: $prtHostBackup"
 
     Write-Host '[3/6] Building the current source...'
-    Invoke-PrtDocker -DockerArguments ($prtCompose + @('build', 'app'))
+    Invoke-PrtDocker -DockerArguments ($prtCompose + @('build') + $prtServices)
     Write-Host '[4/6] Recreating the application with the existing volumes...'
-    Invoke-PrtDocker -DockerArguments ($prtCompose + @('up', '-d', '--no-build', '--force-recreate', '--wait', '--wait-timeout', '180', 'app'))
+    Invoke-PrtDocker -DockerArguments ($prtCompose + @('up', '-d', '--no-build', '--force-recreate', '--wait', '--wait-timeout', '180') + $prtServices)
     Write-Host '[5/6] Checking application health...'
     $prtHealth = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 20
     $prtHealth | ConvertTo-Json -Depth 5 | Write-Host
+    if ($prtServices -contains 'ops-worker') {
+        Invoke-PrtDocker -DockerArguments @('exec', $prtContainer, 'node', 'scripts/record-ops-deployment.mjs')
+    }
     Write-Host '[6/6] Showing container status and recent logs...'
     Invoke-PrtDocker -DockerArguments ($prtCompose + @('ps'))
     Invoke-PrtDocker -DockerArguments ($prtCompose + @('logs', '--tail', '100', 'app'))

@@ -59,68 +59,119 @@ export async function requirementWorkbook(rows) {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
-export function createRequirementExports(store, wiki, { demoMode = false } = {}) {
-  const { one, all, run, tx } = store;
+export function createRequirementExports(store, personalDocuments, { demoMode = false } = {}) {
+  const { one, all, run, tx } = store, active = new Map(), userQueues = new Map();
   store.db.exec(`CREATE TABLE IF NOT EXISTS requirement_exports (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), filters TEXT NOT NULL,
-    preview INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+    preview INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+    destination TEXT NOT NULL DEFAULT 'legacy', authorization_required INTEGER NOT NULL DEFAULT 0, destination_url TEXT NOT NULL DEFAULT ''
   );
   CREATE INDEX IF NOT EXISTS requirement_exports_user ON requirement_exports(user_id,created_at);
   CREATE TABLE IF NOT EXISTS requirement_export_items (
     export_id TEXT NOT NULL REFERENCES requirement_exports(id) ON DELETE CASCADE,
     requirement_id TEXT NOT NULL REFERENCES requirements(id), position INTEGER NOT NULL,
-    title TEXT NOT NULL, rows TEXT NOT NULL, generation INTEGER NOT NULL,
+    title TEXT NOT NULL, rows TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
     completed INTEGER NOT NULL DEFAULT 0, url TEXT NOT NULL DEFAULT '',
+    snapshot TEXT NOT NULL DEFAULT '{}', personal_document_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(export_id,requirement_id)
   );`);
-  const owned = (id, userId) => one('SELECT * FROM requirement_exports WHERE id=? AND user_id=?', id, userId);
+  // Keep old snapshots identifiable; wiki exports must never masquerade as personal exports.
+  for (const [table, columns] of Object.entries({
+    requirement_exports: { destination: "TEXT NOT NULL DEFAULT 'legacy'", authorization_required: 'INTEGER NOT NULL DEFAULT 0', destination_url: "TEXT NOT NULL DEFAULT ''" },
+    requirement_export_items: { snapshot: "TEXT NOT NULL DEFAULT '{}'", personal_document_id: "TEXT NOT NULL DEFAULT ''", state: "TEXT NOT NULL DEFAULT 'queued'", error: "TEXT NOT NULL DEFAULT ''" }
+  })) {
+    const existing = all('PRAGMA table_info(' + table + ')').map(column => column.name);
+    for (const [column, definition] of Object.entries(columns)) if (!existing.includes(column)) store.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+  // User tokens are deliberately not persisted. Resume unfinished batches after fresh consent.
+  run(`UPDATE requirement_exports SET authorization_required=1 WHERE destination='personal' AND preview=0
+    AND EXISTS(SELECT 1 FROM requirement_export_items i WHERE i.export_id=requirement_exports.id AND i.completed=0)`);
+  const owned = (id, userId) => one("SELECT * FROM requirement_exports WHERE id=? AND user_id=? AND destination='personal'", id, userId);
+  const userAllowed = userId => {
+    const user = one('SELECT * FROM users WHERE id=?', userId);
+    return user?.enabled && !user.deleted_at && parse(user.roles, []).includes('pm');
+  };
   function status(id, userId) {
     const job = owned(id, userId);
     if (!job) return null;
-    if (all('SELECT rows FROM requirement_export_items WHERE export_id=?', id).some(item => parse(item.rows, []).some(row => !Object.hasOwn(row, 'title')))) return null;
-    const items = all(`SELECT i.*,w.status AS wiki_status,w.error,w.url AS wiki_url,w.generation AS wiki_generation
-      FROM requirement_export_items i LEFT JOIN requirement_wiki w ON w.requirement_id=i.requirement_id
-      WHERE i.export_id=? ORDER BY i.position`, id);
+    const items = all('SELECT * FROM requirement_export_items WHERE export_id=? ORDER BY position', id);
     let completed = 0, failed = 0;
     const errors = [];
     for (const item of items) {
-      const url = feishuDocumentLink(item.wiki_url)?.url || '';
-      if (!item.completed && (job.preview || item.wiki_status === 'synced' && item.wiki_generation >= item.generation && url)) {
-        run('UPDATE requirement_export_items SET completed=1,url=? WHERE export_id=? AND requirement_id=?', url, id, item.requirement_id);
-        item.completed = 1;
-      }
       if (item.completed) completed++;
-      else if (!item.wiki_status || item.wiki_status === 'failed' || item.wiki_status === 'synced') {
+      else if (['failed', 'uncertain'].includes(item.state) || !active.has(id) && !job.authorization_required) {
         failed++;
-        if (errors.length < 20) errors.push({ requirementId: item.requirement_id, title: item.title, error: item.error || '飞书文档尚未正确同步，请重试' });
+        if (errors.length < 20) errors.push({ requirementId: item.requirement_id, title: item.title, error: item.error || '导出已中断，请重试未完成项' });
       }
     }
-    const pending = items.length - completed - failed;
-    return { id, status: pending ? 'pending' : failed ? 'failed' : 'ready', total: items.length, completed, pending, failed, errors, filters: parse(job.filters), preview: !!job.preview, createdAt: job.created_at };
+    const pending = items.length - completed - failed, authorizationRequired = !!job.authorization_required && completed < items.length;
+    return { id, status: completed === items.length ? 'ready' : authorizationRequired ? 'authorization_required' : active.has(id) ? 'pending' : 'failed', total: items.length, completed, pending, failed, errors, authorizationRequired, filters: parse(job.filters), preview: !!job.preview, createdAt: job.created_at, destination: job.destination_url ? 'wiki' : 'personal', destinationUrl: job.destination_url };
   }
-  function create(userId, filters, items) {
-    const id = uid();
-    tx(() => {
-      // Export snapshots are temporary; the wiki records and uploaded files remain permanent.
-      run('DELETE FROM requirement_exports WHERE created_at<?', new Date(Date.now() - 7 * 86400000).toISOString());
-      run('INSERT INTO requirement_exports(id,user_id,filters,preview,created_at) VALUES(?,?,?,?,?)', id, userId, JSON.stringify(filters), demoMode ? 1 : 0, now());
-      items.forEach((item, position) => run('INSERT INTO requirement_export_items(export_id,requirement_id,position,title,rows,generation) VALUES(?,?,?,?,?,?)', id, item.id, position, item.title, JSON.stringify(item.rows), demoMode ? 0 : wiki.prepareExport(item.id)));
+  async function execute(id, userId, getToken) {
+    try {
+      const destinationUrl = owned(id, userId).destination_url;
+      for (const item of all('SELECT * FROM requirement_export_items WHERE export_id=? AND completed=0 ORDER BY position', id)) {
+        if (!one('SELECT 1 FROM requirements WHERE id=? AND deleted_at IS NULL', item.requirement_id)) {
+          run("UPDATE requirement_export_items SET completed=1,state='deleted',error='需求已删除',url='' WHERE export_id=? AND requirement_id=?", id, item.requirement_id);
+          continue;
+        }
+        if (!userAllowed(userId)) throw new Error('当前账号已停用或不再具有项目经理权限，导出已停止');
+        const token = getToken?.(destinationUrl);
+        if (!token) { run('UPDATE requirement_exports SET authorization_required=1 WHERE id=?', id); break; }
+        run("UPDATE requirement_export_items SET state='pending',error='' WHERE export_id=? AND requirement_id=?", id, item.requirement_id);
+        const document = personalDocuments.start(item.requirement_id, userId, parse(item.snapshot), token, destinationUrl);
+        run('UPDATE requirement_export_items SET personal_document_id=? WHERE export_id=? AND requirement_id=?', document.id, id, item.requirement_id);
+        await personalDocuments.wait(document.id);
+        if (!one('SELECT 1 FROM requirements WHERE id=? AND deleted_at IS NULL', item.requirement_id)) {
+          run("UPDATE requirement_export_items SET completed=1,state='deleted',error='需求已删除',url='' WHERE export_id=? AND requirement_id=?", id, item.requirement_id);
+          continue;
+        }
+        const result = personalDocuments.get(document.id, userId), url = feishuDocumentLink(result?.url)?.url || '';
+        const ready = result?.status === 'ready' && !!url;
+        run('UPDATE requirement_export_items SET state=?,completed=?,url=?,error=? WHERE export_id=? AND requirement_id=?', ready ? 'ready' : result?.status === 'uncertain' ? 'uncertain' : 'failed', ready ? 1 : 0, ready ? url : '', ready ? '' : result?.error || '飞书个人文档未完成，请重试', id, item.requirement_id);
+        if (result?.authorizationRequired) { run('UPDATE requirement_exports SET authorization_required=1 WHERE id=?', id); break; }
+      }
+    } catch (error) {
+      run("UPDATE requirement_export_items SET state='failed',error=? WHERE export_id=? AND completed=0 AND state IN ('pending','queued')", error.message, id);
+    }
+  }
+  function schedule(id, userId, getToken) {
+    if (active.has(id)) return;
+    const previous = userQueues.get(userId) || Promise.resolve();
+    // Serialize a PM's batches and each batch's documents, instead of flooding Feishu.
+    const promise = previous.then(() => execute(id, userId, getToken)).finally(() => {
+      active.delete(id);
+      if (userQueues.get(userId) === promise) userQueues.delete(userId);
     });
+    active.set(id, promise); userQueues.set(userId, promise);
+  }
+  function create(userId, filters, items, getToken) {
+    const id = uid(), destinationUrl = personalDocuments.destination();
+    tx(() => {
+      // Only temporary export snapshots expire; documents and uploaded files remain.
+      run(`DELETE FROM requirement_exports WHERE created_at<? AND NOT EXISTS(
+        SELECT 1 FROM requirement_export_items i WHERE i.export_id=requirement_exports.id AND i.state='pending')`, new Date(Date.now() - 7 * 86400000).toISOString());
+      run("INSERT INTO requirement_exports(id,user_id,filters,preview,created_at,destination,authorization_required,destination_url) VALUES(?,?,?,?,?,'personal',?,?)", id, userId, JSON.stringify(filters), demoMode ? 1 : 0, now(), !demoMode && items.length && !getToken?.(destinationUrl) ? 1 : 0, destinationUrl);
+      items.forEach((item, position) => run('INSERT INTO requirement_export_items(export_id,requirement_id,position,title,rows,generation,snapshot,completed,state) VALUES(?,?,?,?,?,0,?,?,?)', id, item.id, position, item.title, JSON.stringify(item.rows), JSON.stringify(item.snapshot || {}), demoMode ? 1 : 0, demoMode ? 'ready' : 'queued'));
+    });
+    if (!demoMode && items.length && getToken?.(destinationUrl)) schedule(id, userId, getToken);
     return status(id, userId);
   }
-  function retry(id, userId) {
-    if (!status(id, userId)) return null;
-    tx(() => {
-      for (const item of all(`SELECT i.requirement_id,w.status FROM requirement_export_items i
-        LEFT JOIN requirement_wiki w ON w.requirement_id=i.requirement_id WHERE i.export_id=? AND i.completed=0`, id)) {
-        if (item.status !== 'pending') run('UPDATE requirement_export_items SET generation=? WHERE export_id=? AND requirement_id=?', wiki.prepareExport(item.requirement_id), id, item.requirement_id);
-      }
-    });
+  function retry(id, userId, getToken) {
+    const job = status(id, userId);
+    if (!job || job.status === 'ready' || active.has(id)) return job;
+    const token = getToken?.(job.destinationUrl);
+    run('UPDATE requirement_exports SET authorization_required=? WHERE id=?', token ? 0 : 1, id);
+    if (token) {
+      run("UPDATE requirement_export_items SET state='queued',error='' WHERE export_id=? AND completed=0", id);
+      schedule(id, userId, getToken);
+    }
     return status(id, userId);
   }
   function rows(id, userId) {
     if (!owned(id, userId)) return null;
-    return all('SELECT rows,url FROM requirement_export_items WHERE export_id=? ORDER BY position', id).flatMap(item => parse(item.rows, []).map(row => ({ ...row, documentUrl: item.url })));
+    return all('SELECT i.rows,i.url FROM requirement_export_items i JOIN requirements r ON r.id=i.requirement_id WHERE i.export_id=? AND r.deleted_at IS NULL ORDER BY i.position', id).flatMap(item => parse(item.rows, []).map(row => ({ ...row, documentUrl: item.url })));
   }
-  return { create, status, retry, rows };
+  return { create, status, retry, rows, async drain() { while (active.size) await Promise.all([...active.values()]); } };
 }

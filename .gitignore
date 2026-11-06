@@ -13,6 +13,9 @@ backups/
 test-results/
 host-data/
 .host-runtime/
+ops-backups/
+.ops-workspace/
+prt-ops-source.json
 
 # Local databases, generated reports and editor/OS files.
 *.sqlite

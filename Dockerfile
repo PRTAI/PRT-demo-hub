@@ -21,6 +21,16 @@ COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY shared ./shared
 COPY scripts ./scripts
+COPY package*.json index.html vite.config.mjs Dockerfile Dockerfile.ops README.md .gitignore .dockerignore /opt/source/
+COPY compose*.yaml /opt/source/
+COPY server /opt/source/server
+COPY shared /opt/source/shared
+COPY scripts /opt/source/scripts
+COPY src /opt/source/src
+COPY tests /opt/source/tests
+COPY docs /opt/source/docs
+COPY public /opt/source/public
+ENV OPS_SOURCE_DIR=/opt/source
 USER node
 VOLUME ["/app/data", "/app/backups"]
 EXPOSE 3100

@@ -1,0 +1,22 @@
+ARG NODE_IMAGE=mirror.gcr.io/library/node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+FROM ${NODE_IMAGE}
+WORKDIR /opt/ops
+COPY package*.json ./
+RUN npm ci --no-audit --no-fund && npm cache clean --force && mkdir /workspace && chown node:node /workspace
+COPY server ./server
+COPY shared ./shared
+WORKDIR /opt/source
+COPY package*.json index.html vite.config.mjs Dockerfile Dockerfile.ops README.md .gitignore .dockerignore ./
+COPY compose*.yaml ./
+COPY src ./src
+COPY server ./server
+COPY shared ./shared
+COPY scripts ./scripts
+COPY tests ./tests
+COPY docs ./docs
+COPY public ./public
+USER node
+WORKDIR /opt/ops
+ENV PORT=3200
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 CMD node -e "fetch('http://127.0.0.1:3200/health',{headers:{Authorization:'Bearer '+process.env.OPS_WORKER_TOKEN}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+CMD ["node", "server/ops-worker.mjs"]

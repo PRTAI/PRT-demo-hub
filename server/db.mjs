@@ -19,6 +19,7 @@ export function openStore(directory) {
       revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), csrf TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS users_supervisor ON users(supervisor_id);
     CREATE TABLE IF NOT EXISTS oauth_states (state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS assets (
       id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), creator_id TEXT NOT NULL REFERENCES users(id),
@@ -91,6 +92,19 @@ export function openStore(directory) {
       PRIMARY KEY(requirement_id,file_id)
     );
     CREATE INDEX IF NOT EXISTS requirement_files_requirement ON requirement_files(requirement_id,created_at);
+    CREATE TABLE IF NOT EXISTS requirement_replies (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+      requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
+      author_id TEXT NOT NULL REFERENCES users(id), content TEXT NOT NULL,
+      parent_id TEXT REFERENCES requirement_replies(id), request_id TEXT NOT NULL, payload TEXT NOT NULL,
+      created_at TEXT NOT NULL, UNIQUE(author_id,request_id)
+    );
+    CREATE INDEX IF NOT EXISTS requirement_replies_order ON requirement_replies(requirement_id,sequence);
+    CREATE TABLE IF NOT EXISTS requirement_reply_mentions (
+      reply_id TEXT NOT NULL REFERENCES requirement_replies(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+      PRIMARY KEY(reply_id,user_id)
+    );
   `);
   const requirementSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='requirements'").get()?.sql || '';
   if (!requirementSql.includes("'needs_update'") || !requirementSql.includes("'delivered'")) {
@@ -111,6 +125,20 @@ export function openStore(directory) {
   if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'deleted_at')) db.exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
   if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'planned_date')) db.exec("ALTER TABLE requirements ADD COLUMN planned_date TEXT NOT NULL DEFAULT ''");
   if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'deadline_date')) db.exec("ALTER TABLE requirements ADD COLUMN deadline_date TEXT NOT NULL DEFAULT ''");
+  if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'source')) db.exec("ALTER TABLE requirements ADD COLUMN source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('manual','demo'))");
+  if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'deleted_at')) db.exec('ALTER TABLE requirements ADD COLUMN deleted_at TEXT');
+  if (!db.prepare('PRAGMA table_info(assets)').all().some(column => column.name === 'requirement_pending')) db.exec('ALTER TABLE assets ADD COLUMN requirement_pending INTEGER NOT NULL DEFAULT 0');
+  if (!db.prepare('PRAGMA table_info(requirements)').all().some(column => column.name === 'calendar_ready')) {
+    try { db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE requirements ADD COLUMN calendar_ready INTEGER NOT NULL DEFAULT 1;
+      UPDATE requirements SET calendar_ready=0 WHERE source='demo'
+        AND NOT EXISTS(SELECT 1 FROM requirement_files rf WHERE rf.requirement_id=requirements.id)
+        AND NOT EXISTS(SELECT 1 FROM events e WHERE json_extract(e.detail,'$.requirementId')=requirements.id
+          AND (e.action='requirement_reopen' OR e.action='requirement_edit'
+            AND json_extract(e.detail,'$.before.content')<>json_extract(e.detail,'$.after.content')));
+      COMMIT;`); }
+    catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
   if (!db.prepare('PRAGMA table_info(requirement_assignees)').all().some(column => column.name === 'responsibility')) {
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -128,6 +156,7 @@ export function openStore(directory) {
     CREATE TABLE asset_permissions (asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id),level TEXT NOT NULL CHECK(level IN ('readonly','upload','manage')),granted_by TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,PRIMARY KEY(asset_id,user_id));
     INSERT INTO asset_permissions SELECT * FROM asset_permissions_old; DROP TABLE asset_permissions_old; PRAGMA foreign_keys=ON;`);
   db.exec("UPDATE versions SET reviewer_id=(SELECT u.supervisor_id FROM assets a JOIN users u ON u.id=a.owner_id WHERE a.id=versions.asset_id) WHERE reviewer_id IS NULL AND submission_count>0");
+  if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'account_type')) db.exec("ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'human'");
   const one = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);

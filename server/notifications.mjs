@@ -2,14 +2,17 @@ import { uid, now, parse } from './db.mjs';
 import { splitRequirementOwners } from '../shared/requirement-owners.mjs';
 import { requirementDate } from '../shared/requirement-schedule.mjs';
 import { safeFeishuAppLink } from '../shared/feishu-links.mjs';
+import { createRequirementAccess } from './requirement-access.mjs';
+import { hasRequirementCard, requirementCardSql } from './requirement-card.mjs';
 const messageTemplates = {
   submit: ['Demo 待审核', '员工已提交审核，请检查文件和数据说明。'], withdraw: ['Demo 已撤回', '员工已撤回本次审核申请。'],
   reject: ['Demo 需要返修', '主管已退回该版本，请修改后重新提交。'], publish: ['Demo 已发布', '该版本已审核通过并发布。'],
-  unpublish: ['Demo 已下架', '该版本已下架，文件停止下载和预览。'], restore: ['Demo 已恢复发布', '该版本已恢复发布。'],
+  unpublish: ['Demo 已下架', '原发布版本已停止下载和预览，请进入草稿箱继续完善未完成版本。'], restore: ['Demo 已恢复发布', '该版本已恢复发布。'],
   set_default: ['Demo 默认版本已变更', '该版本已设为默认发布版本。'],
   description_generated: ['AI 数据说明已生成', '数据说明已生成，请进入应用审查并决定是否应用到草稿。'],
   requirement_publish: ['新需求已发布', '你是该需求的负责人或发布人，请查看需求详情。'],
-  requirement_calendar: ['需求日程已创建', '请查看飞书日程及邀请。']
+  requirement_calendar: ['需求日程已创建', '请查看飞书日程及邀请。'],
+  requirement_reply: ['需求有新回复', '请查看需求讨论和问题进展。']
 };
 const publicationActions = ['publish', 'restore'];
 export function feishuAppLink(appId, assetId) {
@@ -31,6 +34,7 @@ export function feishuRequirementLink(appId, requirementId) {
 }
 export function createNotifications(store, config) {
   const {one,all,run} = store;
+  const requirementAccess = createRequirementAccess(store);
   store.db.exec(`CREATE TABLE IF NOT EXISTS notifications (
     id TEXT PRIMARY KEY, version_id TEXT, requirement_id TEXT, kind TEXT NOT NULL, round INTEGER NOT NULL,
     recipient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
@@ -49,17 +53,24 @@ export function createNotifications(store, config) {
   }
   store.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS requirement_notification_recipient ON notifications(requirement_id,kind,round,recipient_id) WHERE requirement_id IS NOT NULL');
   function enqueueRequirement(requirement) {
+    if (requirement.deleted_at) return;
     const recipients = all('SELECT u.* FROM users u WHERE u.enabled=1 AND u.deleted_at IS NULL AND (u.id=? OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=? AND ra.user_id=u.id))', requirement.publisher_id, requirement.id);
     const owners = all('SELECT u.name,ra.responsibility FROM users u JOIN requirement_assignees ra ON ra.user_id=u.id WHERE ra.requirement_id=? ORDER BY u.name,u.id', requirement.id), groups = splitRequirementOwners(owners);
     const detail = JSON.stringify({ title: requirement.title, publisher: one('SELECT name FROM users WHERE id=?', requirement.publisher_id).name, assignedNames: owners.map(user => user.name), businessNames: groups.businessOwners.map(user => user.name), developmentNames: groups.developmentOwners.map(user => user.name), publishDate: requirement.planned_date || requirementDate(requirement.created_at), deadlineDate: requirement.deadline_date || '' });
     for (const recipient of recipients) run('INSERT OR IGNORE INTO notifications(id,requirement_id,kind,round,recipient_id,detail,created_at) VALUES(?,?,?,0,?,?,?)', uid(), requirement.id, 'requirement_publish', recipient.id, detail, now());
   }
   function enqueueRequirementCalendar(requirement) {
+    if (requirement.deleted_at || requirement.status === 'closed') return;
+    const round = one('SELECT notification_round FROM requirement_calendar WHERE requirement_id=?', requirement.id)?.notification_round || 0;
     const recipients = all(`SELECT u.id FROM users u WHERE u.enabled=1 AND u.deleted_at IS NULL AND u.open_id NOT LIKE 'preview:%' AND
       (u.id=? OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=? AND ra.user_id=u.id))`, requirement.publisher_id, requirement.id);
-    for (const recipient of recipients) run(`INSERT INTO notifications(id,requirement_id,kind,round,recipient_id,created_at) VALUES(?,?,?,0,?,?)
+    for (const recipient of recipients) run(`INSERT INTO notifications(id,requirement_id,kind,round,recipient_id,created_at) VALUES(?,?,?,?,?,?)
       ON CONFLICT(requirement_id,kind,round,recipient_id) WHERE requirement_id IS NOT NULL
-      DO UPDATE SET status='pending',attempts=0,next_at=0,error='' WHERE notifications.status='skipped'`, uid(), requirement.id, 'requirement_calendar', recipient.id, now());
+      DO UPDATE SET status='pending',attempts=0,next_at=0,error='' WHERE notifications.status='skipped'`, uid(), requirement.id, 'requirement_calendar', round, recipient.id, now());
+  }
+  function enqueueRequirementReply(requirement, reply, actor, recipientIds) {
+    const detail = JSON.stringify({ replyId: reply.id, authorName: actor.name, content: reply.content });
+    for (const id of recipientIds) run('INSERT OR IGNORE INTO notifications(id,requirement_id,kind,round,recipient_id,detail,created_at) VALUES(?,?,?,?,?,?,?)', uid(), requirement.id, 'requirement_reply', reply.sequence, id, detail, now());
   }
   function enqueue(action, asset, version, actor, workflowRound, detail = {}) {
     if (!messageTemplates[action]) return;
@@ -100,7 +111,9 @@ export function createNotifications(store, config) {
       const calendarFilter = one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='requirement_calendar'")
         ? "AND (kind<>'requirement_calendar' OR EXISTS(SELECT 1 FROM requirement_calendar c WHERE c.requirement_id=notifications.requirement_id AND c.status='synced' AND c.event_id<>''))"
         : "AND kind<>'requirement_calendar'";
-      for(const job of all(`SELECT * FROM notifications WHERE status='pending' AND next_at<=? ${calendarFilter} ORDER BY created_at LIMIT 10`,Date.now())) {
+      const cardFilter = `AND (kind<>'requirement_publish' OR EXISTS(SELECT 1 FROM requirements r WHERE r.id=notifications.requirement_id AND ${requirementCardSql()}))`;
+      for(const job of all(`SELECT * FROM notifications WHERE status='pending' AND next_at<=? ${calendarFilter} ${cardFilter} ORDER BY created_at LIMIT 10`,Date.now())) {
+        if (job.kind === 'requirement_reply') { await sendRequirementReply(job); continue; }
         if (['requirement_publish', 'requirement_calendar'].includes(job.kind)) { await sendRequirement(job); continue; }
         const version=one('SELECT * FROM versions WHERE id=?',job.version_id), asset=version&&one('SELECT * FROM assets WHERE id=?',version.asset_id), owner=asset&&one('SELECT * FROM users WHERE id=?',asset.owner_id), recipient=one('SELECT * FROM users WHERE id=?',job.recipient_id);
         const roles=recipient?parse(recipient.roles,[]):[], isOwner=recipient?.id===owner?.id, isSupervisor=recipient?.id===version?.reviewer_id&&roles.includes('supervisor'), isPm=roles.includes('pm'), isCc=!!one('SELECT 1 FROM version_cc WHERE version_id=? AND user_id=?',version?.id||'',recipient?.id||'');
@@ -120,27 +133,68 @@ export function createNotifications(store, config) {
       }
     } finally { busy=false; }
   }
+  async function sendRequirementReply(job) {
+    const allowed = () => {
+      const requirement = one('SELECT * FROM requirements WHERE id=?', job.requirement_id), recipient = one('SELECT * FROM users WHERE id=?', job.recipient_id);
+      const roles = parse(recipient?.roles, []), reply = one('SELECT * FROM requirement_replies WHERE id=? AND requirement_id=?', parse(job.detail).replyId || '', job.requirement_id);
+      if (!requirement || requirement.deleted_at || !reply || !recipient?.enabled || recipient.deleted_at || !roles.length || recipient.open_id.startsWith('preview:')) return null;
+      const addressed = one('SELECT 1 FROM requirement_reply_mentions WHERE reply_id=? AND user_id=?', reply.id, recipient.id)
+        || reply.parent_id && one('SELECT 1 FROM requirement_replies WHERE id=? AND author_id=?', reply.parent_id, recipient.id);
+      const visible = roles.includes('pm') || roles.includes('business')
+        || one('SELECT 1 FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, recipient.id) || requirementAccess.requirement(recipient, requirement.id);
+      return addressed && visible ? { requirement, recipient, reply } : null;
+    };
+    const skip = () => run("UPDATE notifications SET status='skipped',error='需求回复或接收人权限已变化，已取消通知' WHERE id=?", job.id);
+    if (!allowed()) { skip(); return; }
+    try {
+      const bearer = await tokenFor(), current = allowed();
+      if (!current) { skip(); return; }
+      const { requirement, recipient, reply } = current, detail = parse(job.detail);
+      const text = `【需求有新回复】\n${requirement.title}\n回复人：${detail.authorName}\n${reply.content}\n请查看需求详情：${feishuRequirementLink(config.appId, requirement.id)}`;
+      const response = await call('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(15000), body: JSON.stringify({ receive_id: recipient.open_id, msg_type: 'text', content: JSON.stringify({ text }), uuid: job.id }) });
+      const data = await response.json();
+      if (!response.ok || data.code !== 0) { token = ''; throw new Error(`飞书发送失败 (${data.code || response.status})，请检查机器人、发送消息权限及应用可用范围`); }
+      run("UPDATE notifications SET status='sent',attempts=attempts+1,sent_at=?,error='' WHERE id=?", now(), job.id);
+    } catch (error) {
+      const attempts = job.attempts + 1;
+      run("UPDATE notifications SET status=?,attempts=?,next_at=?,error=? WHERE id=? AND status='pending'", attempts >= 5 ? 'failed' : 'pending', attempts, Date.now() + Math.min(300000, 15000 * 2 ** attempts), error.message.startsWith('飞书') || error.message.startsWith('未配置') ? error.message : '网络请求失败，请稍后重试', job.id);
+    }
+  }
   async function sendRequirement(job) {
+    if (job.kind === 'requirement_publish' && !hasRequirementCard(store, job.requirement_id)) return;
     const requirement = one('SELECT * FROM requirements WHERE id=?', job.requirement_id), recipient = one('SELECT * FROM users WHERE id=?', job.recipient_id);
-    const allowed = requirement && (requirement.publisher_id === recipient?.id || one('SELECT 1 FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, recipient?.id || ''));
+    const allowed = requirement && !requirement.deleted_at && (requirement.publisher_id === recipient?.id || one('SELECT 1 FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, recipient?.id || ''));
     if (!allowed || !recipient?.enabled || recipient.deleted_at || recipient.open_id.startsWith('preview:')) {
       run("UPDATE notifications SET status='skipped',error=? WHERE id=?", '需求或接收人权限已变化，已取消通知', job.id); return;
     }
     const calendar = job.kind === 'requirement_calendar' ? one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id) : null;
-    if (job.kind === 'requirement_calendar' && (!calendar || calendar.status !== 'synced' || !calendar.event_id)) return;
+    if (job.kind === 'requirement_calendar' && (requirement.status === 'closed' || job.round !== calendar?.notification_round)) {
+      run("UPDATE notifications SET status='skipped',error='旧日程已关闭或更新，取消通知' WHERE id=?", job.id); return;
+    }
+    if (job.kind === 'requirement_calendar' && (!calendar || calendar.status !== 'synced' || !calendar.event_id || calendar.delete_pending)) return;
     try {
       const bearer = await tokenFor(), detail = parse(job.detail);
+      if (job.kind === 'requirement_publish' && !hasRequirementCard(store, job.requirement_id)) return;
+      const currentRequirement = one('SELECT * FROM requirements WHERE id=?', requirement.id);
+      if (!currentRequirement || currentRequirement.deleted_at) return;
+      if (calendar) {
+        const currentCalendar = one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+        if (currentRequirement.status === 'closed' || currentCalendar.notification_round !== job.round) {
+          run("UPDATE notifications SET status='skipped',error='旧日程已关闭或更新，取消通知' WHERE id=? AND status='pending'", job.id); return;
+        }
+        if (currentCalendar.status !== 'synced' || currentCalendar.delete_pending || currentCalendar.event_id !== calendar.event_id) return;
+      }
       const ownerText = detail.businessNames || detail.developmentNames ? `商务负责人：${detail.businessNames?.join('、') || '未指定'}\n研发负责人：${detail.developmentNames?.join('、') || '未指定'}` : `负责人：${detail.assignedNames?.join('、') || '未指定'}`;
       const publishDate = detail.publishDate || detail.plannedDate;
       const text = `【新需求已发布】\n${detail.title}\n发布人：${detail.publisher}\n${ownerText}${publishDate ? `\n发布日期：${publishDate}\n截止日期：${detail.deadlineDate || '未设置'}` : ''}\n请查看需求详情：${feishuRequirementLink(config.appId, requirement.id)}`;
-      const message = calendar ? { msg_type: 'interactive', content: JSON.stringify(requirementCalendarCard(requirement, calendar)) } : { msg_type: 'text', content: JSON.stringify({ text }) };
+      const message = calendar ? { msg_type: 'interactive', content: JSON.stringify(requirementCalendarCard(currentRequirement, calendar)) } : { msg_type: 'text', content: JSON.stringify({ text }) };
       const response = await call('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(15000), body: JSON.stringify({ receive_id: recipient.open_id, ...message, uuid: job.id }) });
       const data = await response.json();
       if (!response.ok || data.code !== 0) { token = ''; throw new Error(`飞书发送失败 (${data.code || response.status})，请检查机器人、发送消息权限及应用可用范围`); }
       run("UPDATE notifications SET status='sent',attempts=attempts+1,sent_at=?,error='' WHERE id=?", now(), job.id);
     } catch (error) {
       const attempts = job.attempts + 1;
-      run('UPDATE notifications SET status=?,attempts=?,next_at=?,error=? WHERE id=?', attempts >= 5 ? 'failed' : 'pending', attempts, Date.now() + Math.min(300000, 15000 * 2 ** attempts), error.message.startsWith('飞书') || error.message.startsWith('未配置') ? error.message : '网络请求失败，请稍后重试', job.id);
+      run("UPDATE notifications SET status=?,attempts=?,next_at=?,error=? WHERE id=? AND status='pending'", attempts >= 5 ? 'failed' : 'pending', attempts, Date.now() + Math.min(300000, 15000 * 2 ** attempts), error.message.startsWith('飞书') || error.message.startsWith('未配置') ? error.message : '网络请求失败，请稍后重试', job.id);
     }
   }
   function requirementCalendarCard(requirement, calendar) {
@@ -169,8 +223,8 @@ export function createNotifications(store, config) {
   const list=()=>all('SELECT n.*,u.name AS recipient FROM notifications n LEFT JOIN users u ON u.id=n.recipient_id ORDER BY n.created_at DESC LIMIT 100');
   function requirementCalendarSummary(id) {
     const counts = { pending: 0, sent: 0, failed: 0, skipped: 0 };
-    for (const row of all("SELECT status,COUNT(*) AS count FROM notifications WHERE requirement_id=? AND kind='requirement_calendar' GROUP BY status", id)) counts[row.status] = row.count;
+    for (const row of all("SELECT n.status,COUNT(*) AS count FROM notifications n JOIN requirement_calendar c ON c.requirement_id=n.requirement_id WHERE n.requirement_id=? AND n.kind='requirement_calendar' AND n.round=c.notification_round GROUP BY n.status", id)) counts[row.status] = row.count;
     return counts;
   }
-  return {enqueue,enqueueDirect,enqueueRequirement,enqueueRequirementCalendar,requirementCalendarSummary,drain,list,start(){const timer=setInterval(()=>drain().catch(()=>console.error('Notification worker failed')),5000);timer.unref();return()=>clearInterval(timer);}};
+  return {enqueue,enqueueDirect,enqueueRequirement,enqueueRequirementCalendar,enqueueRequirementReply,requirementCalendarSummary,drain,list,start(){const timer=setInterval(()=>drain().catch(()=>console.error('Notification worker failed')),5000);timer.unref();return()=>clearInterval(timer);}};
 }

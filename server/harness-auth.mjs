@@ -35,7 +35,7 @@ export function setupHarnessAuth(app, store, config) {
       if (store.one('SELECT nonce FROM harness_nonces WHERE nonce=?', claims.nonce)) throw Error();
       store.run('INSERT INTO harness_nonces VALUES(?,?)', claims.nonce, claims.exp);
       const user = store.one('SELECT * FROM users WHERE open_id=? AND enabled=1 AND deleted_at IS NULL', claims.openId);
-      if (!user || !JSON.parse(user.roles).length) return res.status(403).json({ error: '此飞书账号在 Demo Hub 尚未授权或已停用，请联系平台管理员' });
+      if (!user || user.account_type === 'virtual' || !JSON.parse(user.roles).length) return res.status(403).json({ error: '此飞书账号在 Demo Hub 尚未授权或已停用，请联系平台管理员' });
       const token = randomBytes(32).toString('base64url'), seconds = 1800;
       store.run('DELETE FROM harness_sessions WHERE expires<?', Date.now());
       store.run('INSERT INTO harness_sessions VALUES(?,?,?)', digest(token), user.id, Date.now() + seconds * 1000);
@@ -48,6 +48,7 @@ export function setupHarnessAuth(app, store, config) {
       if (!secret || !bearer?.startsWith('Bearer ')) return null;
       if (!allowed(req.method, req.originalUrl.split('?')[0])) return null;
       const user = store.one('SELECT u.* FROM harness_sessions s JOIN users u ON u.id=s.user_id WHERE s.hash=? AND s.expires>? AND u.enabled=1 AND u.deleted_at IS NULL', digest(bearer.slice(7)), Date.now());
+      if (user?.account_type === 'virtual') return null;
       if (user) req.harnessAuthenticated = true;
       return user;
     },

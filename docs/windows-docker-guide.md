@@ -1,277 +1,96 @@
-# Windows Docker 简明部署手册
+# Windows Docker 更新手册
 
-本次需求状态、我的需求、飞书文档预览和内外网上传更新，请先参照 [需求协作与内外网上传更新](requirements-network-update.md)，其中包含新增配置与保留原数据卷的更新命令。
-
-适用环境：源码已复制到 `J:\PRT-demo-hub-test`，Windows 主机 IP 为 `192.168.110.25`，使用 Docker Desktop 的 Linux 容器模式。
-
-访问地址为 `http://192.168.110.25:8001`。全部命令在这台 Windows 主机的同一个 PowerShell 窗口执行，另有说明的除外。无需在宿主机安装 Node.js，也无需手动执行 npm 构建；Dockerfile 会完成编译和依赖安装。
+适用于 `J:\PRT-demo-hub-test` 中的现有平台，容器为 `prt-datahub-production`。命令均在部署机 PowerShell 执行；Docker 自动编译，无需宿主机安装 Node.js。
 
 ## 更新当前已运行的容器并保留旧数据
 
-本节适用于已确认运行容器为 `prt-datahub-production`、数据卷为 `prt-datahub-production_production-data`、备份卷为 `prt-datahub-production_production-backups`，且容器使用 `/app/data` 的实例。使用本节的 `compose.keep-data.yaml`，不要叠加后文用于新建独立测试实例的 `compose.windows-test.yaml`。
+首次启用内置 DeepSeek 运维，请先按 [运维配置与部署](deepseek-ops.md)填写工作器随机密钥和 GitHub 令牌，并在更新命令末尾加 `-EnableOps`。启用后的后续更新脚本会自动保留工作器。运维开发、北京时间午夜备份及 feature/deepseek 自动提交也见该文档。
 
-1. 将开发目录的最新源码重新复制到 `J:\PRT-demo-hub-test`，包含 `src`、`server`、`shared`、`scripts`、`public`、`docs`、`config`、`Dockerfile`、`package.json`、`package-lock.json`、`index.html`、`vite.config.mjs`、`compose.production.yaml` 和新增的 `compose.keep-data.yaml`。保留 Windows 上现有 `.env`，无需传输 `node_modules`、`dist`、开发环境数据或备份。
-2. 在 Windows PowerShell 中执行准备、核对和备份：
+1. 将最新完整源码同步到 `J:\PRT-demo-hub-test`，包含 `scripts`、`server`、`src`、`shared`、`tests`、`docs`、`public`、Dockerfile、Compose、依赖清单，以及隐藏文件 `.gitignore`、`.dockerignore`。保留部署机 `.env`，不复制开发数据、`node_modules` 或 `dist`。通过 `scp *` 复制可能漏掉隐藏文件；更新脚本会先调用 `scripts/repair-docker-build.ps1` 补齐缺失的构建忽略文件，再检查完整源码。
+2. 启动 Docker Desktop，执行下面整段命令。脚本自动检查原数据卷、备份并导出到 J 盘、构建镜像、重建容器、检查健康状态。
+3. 成功后打开平台并按 `Ctrl+F5` 刷新。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 Set-Location 'J:\PRT-demo-hub-test'
-$prtUpdate = @('-f', 'compose.production.yaml', '-f', 'compose.keep-data.yaml')
-foreach ($prtFile in @('Dockerfile', 'compose.production.yaml', 'compose.keep-data.yaml', '.env')) {
-    if (-not (Test-Path $prtFile)) { throw "缺少文件：$prtFile" }
-}
+
 docker version
 if ($LASTEXITCODE -ne 0) { throw '请先启动 Docker Desktop' }
-docker inspect --format '{{json .Mounts}}' prt-datahub-production
-if ($LASTEXITCODE -ne 0) { throw '未找到当前业务容器，停止操作' }
-docker volume inspect prt-datahub-production_production-data prt-datahub-production_production-backups
-if ($LASTEXITCODE -ne 0) { throw '原数据卷不存在，停止操作' }
-docker compose @prtUpdate config --quiet
-if ($LASTEXITCODE -ne 0) { throw '配置检查失败，停止操作' }
-$prtStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-$prtContainerBackup = '/app/backups/before-requirement-docs-' + $prtStamp
-$prtBackup = 'J:\PRT-backups\before-requirement-docs-' + $prtStamp
-docker exec prt-datahub-production node scripts/backup.mjs $prtContainerBackup
-if ($LASTEXITCODE -ne 0) { throw '备份失败，停止更新' }
-New-Item -ItemType Directory -Path $prtBackup -Force | Out-Null
-docker cp "prt-datahub-production:${prtContainerBackup}/." $prtBackup
-if ($LASTEXITCODE -ne 0) { throw '备份导出失败，停止更新' }
-if (-not (Test-Path (Join-Path $prtBackup 'manifest.json'))) { throw '备份不完整，停止更新' }
+
+docker start prt-datahub-production
+if ($LASTEXITCODE -ne 0) { throw '旧容器启动失败，停止更新' }
+
+docker exec prt-datahub-production node -e 'console.log(process.version)'
+if ($LASTEXITCODE -ne 0) { throw '容器运行环境异常，停止更新' }
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File 'J:\PRT-demo-hub-test\scripts\update-docker.ps1' `
+  -ProjectDirectory 'J:\PRT-demo-hub-test' `
+  -BackupDirectory 'J:\PRT-backups'
+if ($LASTEXITCODE -ne 0) { throw '更新失败，请查看上方报错，不继续操作' }
+
+Invoke-RestMethod 'http://127.0.0.1:8001/api/health' -TimeoutSec 15
 ```
 
-挂载核对应看到两个原卷分别挂到 `/app/data` 和 `/app/backups`；如果名称或路径与本节不同，先按实际挂载调整保留数据配置，再继续。
+内网地址：`http://192.168.110.25:8001`；公网地址：`http://data.prt-ai.cn:8001`。健康接口应返回 `ok: true`。
 
-3. 构建并重建当前容器：
+自动需求卡片和默认个人根目录导出无需新增环境变量；指定知识库需配置 `FEISHU_REQUIREMENT_EXPORT_WIKI_PARENT_URL`，数据库启动时自动升级。批量导出：项目经理按筛选点击“导出 Excel”，按提示完成飞书授权并继续本批；全部文档成功后自动下载表格。自动卡片验收：员工或主管上传新 Demo，不选择需求，保存后在“我的需求”查看自动卡片；项目经理、商务可编辑卡片及调整负责人。原有账号、Demo 和文件应仍可访问。
+
+本轮更新需飞书应用开通用户身份 `docs:document.media:upload`（附件上传）及原 `docx:document`，知识库目标还需 `wiki:wiki`；发布应用版本后，项目经理在导出时重新授权。关闭需求删除日程需应用身份 `calendar:calendar.event:delete` 或已有 `calendar:calendar`。无需新增环境变量。更新后重新导出一条需求检查原生排版、真实附件和准确文档名，再验证成本／数据量级“保存选填、提交必填”、关闭／重开日程，以及详情返回列表定位。
+
+上级查看下属需求：无需新增 `.env` 或飞书权限。更新后在“人员与权限”为员工、主管依次设置“负责主管”，各级上级即可在需求中心查看下属被分配的历史及新需求、下载附件并读取关联 Demo；“我的需求”只列直接分配给自己。可用两级主管验证可见性，再变更负责主管确认旧上级权限回收。
+
+独立上传验收：Demo 名称和至少一个非空文件／压缩包必填，首个文件完整保存后才创建需求卡片，初始不创建日程。只保存说明、空文件、首个文件上传失败／中断均不建卡。移除全部文件或删除草稿后，尚未被维护的自动卡片退出需求列表和导出；原 Demo 补传文件后恢复同一张卡片。旧空卡片同样处理，已维护和手动发布的需求保留。项目经理或商务补充需求正文或上传需求文档后才建日程；只改负责人、标题或状态不触发。首次导出成功后，改需求状态或 Demo 说明，等待同步成功，刷新原飞书链接检查新内容。同步与导出共用原导出项目经理的用户授权，不再读取 sample 或另外创建协作文档。授权失效、退出登录或容器重启后，由原导出者重新授权再点“同步当前内容”。无需新增 `.env`，也无需仅为同步已导出文档额外开通应用身份的 sample 权限。关闭需求后卡片整体为灰色，仍排在最后。
+
+## 本次功能验收：删除需求卡片
+
+无需新增 `.env` 或手工执行 SQL，沿用上方更新命令，启动时自动升级数据库。更新后按 `Ctrl+F5` 刷新：项目经理、商务在卡片与详情页均能看到“删除需求”，其他角色不显示。用测试需求确认删除后列表、搜索和导出不再包含它，关联 Demo 和原文件仍可访问；关联飞书日程随后删除，已导出的飞书文档保留。
+
+## 删除需求文档验收
+
+无需修改 `.env`，沿用上方更新脚本。更新后按 `Ctrl+F5` 刷新，在需求详情检查：项目经理、商务可见附件右侧“删除”按钮，其他角色不显示；确认删除后附件消失、原下载入口失效，已导出的飞书文档随后同步。其他需求或 Demo 引用的原文件保留。
+
+## 草稿箱和需求回复验收
+
+本次无需修改 `.env` 或新增飞书权限，数据库启动时自动建立回复记录表；按上方同一段命令更新。同步完整源码，包含新增的 `server/requirement-replies.mjs`、`src/RequirementReplies.jsx` 和样式文件。
+
+1. 下架一份已发布样例，确认自动打开新草稿，可在“草稿箱”找到并编辑；原下架版本和发布记录保留。已有未完成版本时应保留原内容。
+2. 在需求内容下方发送进展，输入 `@` 搜索并选择研发，确认关联账号可回复、被提醒人员收到飞书消息。直接回复留言应提醒原作者；仅继承查看权限的上级保持只读。
+3. 刷新页面检查回复、提及和历史记录仍在；管理员可在飞书通知记录查看“需求回复提醒”。
+
+## 磁盘清理后首次更新
+
+若之前出现退出码 `135` 或 `input/output error`，释放空间后先退出 Docker Desktop，执行 `wsl --shutdown`，再重新打开 Docker Desktop，等待引擎启动后执行上面的更新命令。这会中断其他 WSL 和 Docker 服务。
+
+脚本先在 `/app/backups` 生成全量备份，再复制到 `J:\PRT-backups`。Docker 虚拟磁盘所在盘和 J 盘都需要足够空间；J 盘空间充足不能替代 Docker 内部可用空间。备份失败不继续更新；失败目录不可用于恢复。
+
+仍有 `135`、I/O 错误、名称冲突或挂载不符时停止操作，保留报错和容器状态。不要删除冲突容器、数据卷或重置 Docker 来强行继续。
+
+## 查看状态和日志
+
+如果构建报 `"/.dockerignore": not found` 或缺少 `.gitignore`，同步新增的修复脚本后，先执行以下命令，再运行上方更新命令：
+
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'J:\PRT-demo-hub-test\scripts\repair-docker-build.ps1' -ProjectDirectory 'J:\PRT-demo-hub-test'
+if ($LASTEXITCODE -ne 0) { throw '构建文件修复失败，请查看上方报错' }
+~~~
+
+修复脚本补齐缺失的忽略文件，保留已有自定义规则，确保 Docker 可以复制这两个构建元数据文件，同时排除密钥、运行数据和依赖目录。此阶段构建失败且健康检查仍为 true 时，旧平台继续运行，补文件后重新更新即可。
 
 ```powershell
-docker compose @prtUpdate build
-if ($LASTEXITCODE -ne 0) { throw '镜像构建失败，停止更新' }
-docker compose @prtUpdate up -d --no-build --force-recreate --wait app
-if ($LASTEXITCODE -ne 0) { throw '容器启动失败，请查看日志' }
-docker compose @prtUpdate ps
-Invoke-RestMethod 'http://127.0.0.1:8001/api/health'
-docker compose @prtUpdate logs --tail 80 app
+docker ps -a --filter 'name=prt-datahub-production'
+docker logs --tail 100 prt-datahub-production
+Invoke-RestMethod 'http://127.0.0.1:8001/api/health' -TimeoutSec 15
 ```
 
-若再次遇到“新镜像已有功能，但运行容器仍是旧代码”，确认执行了本节的 `up --force-recreate`；单独 `build` 或 `restart` 不会替换旧容器使用的镜像。无需在 Windows 上运行 npm，也无需手动修改数据库。
+现有平台使用 `compose.production.yaml` + `compose.keep-data.yaml`，保留 `prt-datahub-production_production-data` 和 `prt-datahub-production_production-backups` 两个数据卷。不要执行 `down -v` 或删除数据卷。单独 `restart` 不会更新镜像或加载新的环境变量。
 
-4. 浏览器打开 `http://192.168.110.25:8001`，按 `Ctrl+F5` 强制刷新，重新登录后验收：
+更新脚本自动沿用当前容器所属的 Compose 项目，包括 `prt-datahub-current`，避免切回默认项目导致名称冲突。批量 Excel 与单条需求共用项目经理的用户授权，默认导出到其个人云文档。统一放到指定知识库时，新增 `FEISHU_REQUIREMENT_EXPORT_WIKI_PARENT_URL` 并按 [目标目录设置](requirements-export-update.md#将单条和批量导出放到指定知识库目录)补齐用户权限、重新授权。首次批量授权返回后点击“已授权，继续本批导出”。详情见 [导出及权限排查](requirements-export-update.md#批量导出的权限与失败排查)。
 
-- 商务或产品经理：发布需求，选择一个员工并上传两份小文档，详情中应能下载。
-- 被指定员工：列表能看到需求，可查看详情和下载文档；详情页可点击“上传 Demo”，但没有发布、编辑、上传文档、关闭或修改绑定按钮。
-- 侧栏“我的需求”：只显示指定给当前账号的需求；需求状态可见“进行中”“待更新”“已交付”“已关闭”。
-- 未指定员工及未指定的单独管理员角色：列表不显示该需求，复制详情或下载链接也无法访问。
-- 原发布人取消指定该员工后，该员工立即失去详情和文档下载权限。
-- 不选择人员也能发布，此时仅商务和产品经理可在需求中心查看。历史需求默认没有指定人员，需原发布人编辑补选。
-- 原有 Demo、账号、文件及角色继续存在。
+## 其他说明
 
-“项目经理”沿用平台现有的“产品经理（pm）”角色。此更新会自动创建人员指定和需求文档关联表，需求文档纳入原有备份恢复流程。不要执行 `docker compose down -v`、`docker volume rm` 或删除数据目录。`compose.keep-data.yaml` 将原卷声明为外部卷，卷不存在时会报错，避免意外启动空库。
-
-以下章节用于新建独立测试实例；已运行实例完成本节即可，无需重复迁移或初始化管理员。
-
-## 1. 检查文件并准备配置
-
-```powershell
-$ErrorActionPreference = 'Stop'
-Set-Location 'J:\PRT-demo-hub-test'
-docker version
-docker compose version
-$prtCompose = @('-f', 'compose.production.yaml', '-f', 'compose.windows-test.yaml')
-```
-
-目录应包含 `Dockerfile`、`compose.production.yaml`、`compose.windows-test.yaml`、`package.json`、`package-lock.json`、`src`、`server` 和 `scripts`。若缺少本手册或测试配置文件，从最新开发目录补复制。
-
-如果没有 `.env`，从模板复制，已有配置则直接编辑：
-
-```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.exampl .env }
-notepad .env
-```
-
-修改并补齐以下内容，所有“填写”值都需要替换：
-
-```dotenv
-APP_ORIGIN=http://192.168.110.25:8001
-FEISHU_APP_ID=填写原飞书应用的AppID
-FEISHU_APP_SECRET=填写原飞书应用的AppSecret
-FEISHU_TENANT_KEY=填写原企业tenant_key
-DEEPSEEK_API_KEY=填写DeepSeek官方平台签发的Key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_ENABLE_THINKING=false
-RAG_LLM_MAX_TOKENS=
-RAG_LLM_REQUEST_TIMEOUT_MS=90000
-DESCRIPTION_AGENT_TIMEOUT_MS=180000
-DESCRIPTION_AGENT_REQUEST_TIMEOUT_MS=90000
-DESCRIPTION_AGENT_MAX_TOKENS=
-BOOTSTRAP_ADMIN_OPEN_IDS=
-```
-
-数据说明和智能检索共用 DeepSeek 官方 Pro 模型配置，旧阿里云配置及原来的 `DESCRIPTION_AGENT_API_KEY`、地址、型号、协议和思考开关不再读取。完整说明与双功能自检见 [DeepSeek 官方 Pro 配置](deepseek-configuration.md)。
-
-Compose 读取的是新目录的 `.env`，不读取 `.env.host`。当前主配置固定内网 HTTP 模式、关闭体验登录，监听宿主机 `8001`；`.env` 里的 `PORT`、`DATA_DIR` 和 `NODE_ENV` 不覆盖 Compose 中同名的显式配置。测试数据放在独立卷中，容器内路径为 `/app/data/live`。
-
-## 2. 校验并编译镜像
-
-```powershell
-docker compose @prtCompose config --quiet
-if ($LASTEXITCODE -ne 0) { throw '配置检查失败，请检查 .env' }
-docker compose @prtCompose build
-if ($LASTEXITCODE -ne 0) { throw '镜像构建失败，停止部署' }
-```
-
-若构建时基础镜像下载失败，检查 Docker 网络或企业镜像仓库；不要跳过失败继续启动。
-
-## 3. 迁移旧 Docker 数据
-
-如需保留旧数据，在首次启动前完成本节。若已有完整校验备份，可以直接将 `$prtBackup` 设置为该备份的绝对路径，并从“恢复备份”继续。全新空库可以跳过本节。
-
-查看旧容器，确认哪个是原飞书业务平台，不能选体验容器或新测试容器：
-
-```powershell
-docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-$prtOldContainer = Read-Host '请输入旧业务容器的准确名称'
-docker inspect --format '{{json .Mounts}}' $prtOldContainer
-```
-
-确认挂载指向原数据库和文件。暂停旧平台业务操作，生成完整备份并取出：
-
-```powershell
-$prtStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-$prtBackup = 'J:\PRT-backups\docker-' + $prtStamp
-$prtContainerBackup = '/app/backups/migration-' + $prtStamp
-docker exec $prtOldContainer node scripts/backup.mjs $prtContainerBackup
-if ($LASTEXITCODE -ne 0) { throw '旧容器备份失败' }
-New-Item -ItemType Directory -Path $prtBackup | Out-Null
-docker cp "${prtOldContainer}:${prtContainerBackup}/." $prtBackup
-if ($LASTEXITCODE -ne 0) { throw '导出备份失败' }
-if (-not (Test-Path (Join-Path $prtBackup 'manifest.json'))) { throw '备份不完整' }
-docker stop $prtOldContainer
-if ($LASTEXITCODE -ne 0) { throw '旧容器停止失败' }
-```
-
-备份会生成一致数据库快照，并校验文件。自备份开始至切换验收完成，旧平台不应再接收写入。保留旧容器和旧数据卷，不删除。
-
-恢复备份（目标 `/app/data/live` 必须不存在）：
-
-```powershell
-docker compose @prtCompose run --rm --no-deps `
-  --volume "${prtBackup}:/restore:ro" `
-  app node scripts/restore.mjs /restore /app/data/live
-if ($LASTEXITCODE -ne 0) { throw '恢复失败，停止部署' }
-```
-
-若提示目标已存在，不要删除数据或卷，先确认是否已恢复或启动过。旧账号、角色、Demo、版本和文件随备份保留；登录会话会清除，需要重新登录。
-
-## 4. 配置飞书并启动
-
-在原飞书应用中新增登录回调：`http://192.168.110.25:8001/api/auth/callback`，保留旧回调。测试消息跳转时，将网页应用主页切换为 `http://192.168.110.25:8001/`，按控制台要求发布配置。应用可用范围应覆盖使用者，机器人需具备 `im:message:send_as_bot` 权限。
-
-```powershell
-docker compose @prtCompose up -d --wait
-if ($LASTEXITCODE -ne 0) { throw '启动失败，请查看容器日志' }
-docker compose @prtCompose ps
-Invoke-RestMethod 'http://127.0.0.1:8001/api/health'
-docker compose @prtCompose logs --tail 80 app
-```
-
-应看到容器健康，接口返回 `ok: true`。浏览器打开 `http://192.168.110.25:8001/`，用原飞书账号登录，核对 Demo、文件下载、角色、需求绑定、AI 说明及发布通知。恢复旧库后不需要初始化管理员。
-
-如为空库：指定管理员先完成飞书登录，取得待授权页面的“平台用户编号”，然后初始化首位管理员：
-
-```powershell
-$prtAdminId = Read-Host '请输入指定管理员的平台用户编号'
-docker compose @prtCompose exec app node scripts/admin.mjs $prtAdminId
-```
-
-如果本机访问正常、其他内网电脑访问失败，检查 Windows 防火墙和 Docker Desktop 端口映射。在管理员 PowerShell 中按需增加规则：
-
-```powershell
-if (-not (Get-NetFirewallRule -Name 'PRT-Docker-8001' -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -Name 'PRT-Docker-8001' -DisplayName 'PRT Docker TCP 8001' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8001 -RemoteAddress LocalSubnet -Profile Any
-}
-```
-
-## 5. 常用维护命令
-
-每次重新打开 PowerShell，先执行：
-
-```powershell
-Set-Location 'J:\PRT-demo-hub-test'
-$prtCompose = @('-f', 'compose.production.yaml', '-f', 'compose.windows-test.yaml')
-```
-
-```powershell
-docker compose @prtCompose ps
-docker compose @prtCompose logs --tail 100 app
-docker compose @prtCompose restart app
-docker compose @prtCompose stop
-docker compose @prtCompose start
-```
-
-更新前备份并导出到宿主机（每次使用新目录）：
-
-```powershell
-$prtStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-$prtBackup = 'J:\PRT-backups\before-update-' + $prtStamp
-$prtContainerBackup = '/app/backups/before-update-' + $prtStamp
-docker compose @prtCompose exec app node scripts/backup.mjs $prtContainerBackup
-if ($LASTEXITCODE -ne 0) { throw '备份失败' }
-New-Item -ItemType Directory -Path $prtBackup | Out-Null
-docker cp "prt-datahub-windows-test:${prtContainerBackup}/." $prtBackup
-if ($LASTEXITCODE -ne 0) { throw '导出备份失败' }
-```
-
-同步最新源码时保留 `.env` 和备份，更新服务：
-
-```powershell
-docker compose @prtCompose build
-if ($LASTEXITCODE -ne 0) { throw '构建失败' }
-docker compose @prtCompose up -d --wait
-if ($LASTEXITCODE -ne 0) { throw '启动失败' }
-Invoke-RestMethod 'http://127.0.0.1:8001/api/health'
-```
-
-只修改 `.env` 后也需执行 `up -d --wait`，单独 `restart` 不会加载新的容器环境变量。不要执行 `down -v` 或删除数据卷。测试使用的独立数据卷为 `prt-datahub-windows-test-data` 和 `prt-datahub-windows-test-backups`。
-
-验收失败且尚无需保留的新写入时，可停止新测试容器，再启动旧容器，并恢复飞书原主页。新实例已有业务写入时，先备份并确认数据取舍，不直接切回旧库。Docker 自动重启依赖 Docker Desktop 引擎已启动；Windows 重启后需确保 Docker Desktop 正常运行。
-
-## AI 输出被截断
-
-模型返回 `max_tokens` 或 `length` 表示输出额度耗尽，不等同于网络超时。新版默认不设置应用侧 token 上限：`.env` 中 `DESCRIPTION_AGENT_MAX_TOKENS` 和 `RAG_LLM_MAX_TOKENS` 删除或留空时，请求中不发送 `max_tokens`，使用模型服务默认值。模型服务仍有自己的默认输出和上下文限制，省略参数并不表示无限输出。
-
-后续需要控制成本时，可按需填写 `DESCRIPTION_AGENT_MAX_TOKENS=8192`、`RAG_LLM_MAX_TOKENS=4096`，重建容器后生效；留空可以取消应用侧额度。显式额度允许范围为 1024～32768，且须符合实际模型限制，不要填 `0`。额度只限制每次请求的输出，增加额度可能增加延迟和费用。
-
-统一设置 `DEEPSEEK_ENABLE_THINKING=false`，数据说明和智能检索均向官方接口发送 `thinking: {type: disabled}`。截断结果不会保存，也不会为额度耗尽自动重试；智能检索出现截断时会回退本地检索。
-
-更新最新源码、`Dockerfile` 及 `compose.production.yaml` 后重新构建并重建当前实例，保留原数据卷及其配置。仅修改 `.env` 不会更新旧镜像代码。可在当前容器执行 `node scripts/check-description-agent.mjs --all`，使用合成 CSV 和合成 Demo 检查实际接口、输出额度、生成结果及检索工具调用。
-
-### 切换 DeepSeek 官方接口
-
-两处 AI 功能统一使用官方高级模型，不能将阿里云 Key 或阿里云模型部署名称原样用于官方接口。按当前 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/) 和 [思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode)，配置如下：
-
-```dotenv
-DEEPSEEK_API_KEY=填写DeepSeek官方平台签发的Key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_ENABLE_THINKING=false
-DESCRIPTION_AGENT_MAX_TOKENS=
-RAG_LLM_MAX_TOKENS=
-```
-
-新代码调用 `https://api.deepseek.com/chat/completions`，发送官方的 `thinking: {type: disabled}` 参数。切换前需同步最新源码（包括 `server/model-config.mjs`）、Compose 和 Dockerfile，重新构建镜像并重建容器。旧的连接、型号、协议和思考参数不再读取，具体迁移清单见 [统一模型配置](deepseek-configuration.md)。
-
-对当前 `prt-datahub-production` 实例，在本手册开头的备份步骤完成后执行：
-
-```powershell
-$prtUpdate = @('-f', 'compose.production.yaml', '-f', 'compose.keep-data.yaml')
-docker compose @prtUpdate config --quiet
-if ($LASTEXITCODE -ne 0) { throw '配置检查失败' }
-docker compose @prtUpdate build
-if ($LASTEXITCODE -ne 0) { throw '镜像构建失败' }
-docker compose @prtUpdate up -d --no-build --force-recreate --wait app
-if ($LASTEXITCODE -ne 0) { throw '容器启动失败' }
-docker exec prt-datahub-production node scripts/check-description-agent.mjs --all
-```
-
-自检应显示 `deepseek-v4-pro`、`openai`、官方 HTTP 地址、`思考模式：false`，并报告说明生成和智能检索自检成功。若仍显示 `true`，检查 `.env` 的 `DEEPSEEK_ENABLE_THINKING` 重复条目、PowerShell 同名环境变量覆盖，以及是否已重建正确容器。两处 AI 功能现在均使用这一套官方配置。
+- [新建独立测试实例与迁移](windows-docker-new-instance.md)：仅在新建实例时使用 `compose.windows-test.yaml`。
+- [DeepSeek 模型配置与自检](deepseek-configuration.md)。
+- [需求、Demo 自动卡片与权限](requirements.md)。
+- [飞书文档和 Excel 导出配置](requirements-export-update.md)。
+- [需求日历配置](requirements-calendar-update.md)。

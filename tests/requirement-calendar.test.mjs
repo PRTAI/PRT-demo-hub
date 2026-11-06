@@ -38,6 +38,13 @@ function fixture(t, options = {}) {
       const event = ctx.events.values().next().value; Object.assign(event, body);
       return response({ event });
     }
+    if (url.pathname.endsWith('/events/event_mock') && method === 'DELETE') {
+      if (ctx.controls.failDelete) { ctx.controls.failDelete--; throw new Error('temporary deletion failure'); }
+      const hadEvent = ctx.events.size > 0;
+      ctx.events.clear(); ctx.attendees.clear();
+      if (ctx.controls.loseDeleteResponse) { ctx.controls.loseDeleteResponse--; throw new Error('delete response lost'); }
+      return hadEvent ? response({}) : { ok: false, status: 403, json: async () => ({ code: 193003 }) };
+    }
     if (url.pathname.endsWith('/attendees') && method === 'GET') {
       assert.equal(url.searchParams.get('user_id_type'), 'open_id');
       return response({ items: [...ctx.attendees.values()], has_more: false });
@@ -76,6 +83,33 @@ test('requirement schedule uses China dates, validates dates and handles exclusi
   assert.equal(nextRequirementDate('2027-12-31'), '2028-01-01');
   const link = new URL(feishuRequirementLink('cli_test', 'requirement_test'));
   assert.equal(link.searchParams.get('path'), '/?view=requirements&requirement=requirement_test');
+});
+
+test('deferred Demo requirements do not create schedules on backfill, restart or directory updates and activate once completed', async t => {
+  const ctx = fixture(t);
+  ctx.store.run("UPDATE requirements SET source='demo',calendar_ready=0 WHERE id=?", ctx.id);
+  ctx.calendar.enqueue(ctx.id); ctx.calendar.enqueueForUser('preview-employee');
+  assert.equal(ctx.calendar.info(ctx.id), null); assert.equal(ctx.job(), undefined);
+  const restarted = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications);
+  await restarted.drain();
+  assert.equal(ctx.calls.length, 0); assert.equal(ctx.events.size, 0); assert.equal(ctx.messages.length, 0);
+  ctx.store.run('UPDATE requirements SET calendar_ready=1 WHERE id=?', ctx.id);
+  restarted.enqueue(ctx.id); await restarted.drain();
+  assert.equal(restarted.info(ctx.id).status, 'synced'); assert.equal(ctx.events.size, 1);
+  await restarted.drain(); assert.equal(ctx.events.size, 1);
+});
+
+test('upgrade cleans the prematurely created schedule of an incomplete automatic card and never recreates it until completed', async t => {
+  const ctx = fixture(t);
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 1);
+  ctx.store.run("UPDATE requirements SET source='demo',calendar_ready=0 WHERE id=?", ctx.id);
+  const restarted = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications);
+  assert.equal(restarted.info(ctx.id).appLink, ''); assert.equal(restarted.info(ctx.id).deleting, true);
+  await restarted.drain(); assert.equal(ctx.events.size, 0); assert.equal(restarted.info(ctx.id), null);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS n FROM notifications WHERE requirement_id=? AND kind='requirement_calendar' AND status='pending'", ctx.id).n, 0);
+  await restarted.drain(); assert.equal(ctx.events.size, 0);
+  ctx.store.run('UPDATE requirements SET calendar_ready=1 WHERE id=?', ctx.id);
+  restarted.enqueue(ctx.id); await restarted.drain(); assert.equal(ctx.events.size, 1);
 });
 
 test('calendar backfills old requirements and creates private all-day events with deduplicated publisher and owners', async t => {
@@ -294,7 +328,85 @@ test('waiting calendar cards do not block other requirement notifications in the
   ctx.notifications.enqueueRequirement(ctx.store.one('SELECT * FROM requirements WHERE id=?', ctx.id));
   await ctx.notifications.drain();
   assert.equal(ctx.messages.length, 2); assert.ok(ctx.messages.every(message => message.msg_type === 'text'));
-  assert.equal(ctx.calendar.info(ctx.id).messages.pending, 10);
+  assert.equal(ctx.calendar.info(ctx.id).messages.pending, 2); // Only this event cycle, not archived rounds.
+});
+
+test('closing deletes the actual event, hides its link, cancels queued cards and a later reopening publishes a fresh event and cards', async t => {
+  const ctx = fixture(t); await ctx.calendar.drain(); await ctx.notifications.drain();
+  const key = ctx.job().event_key;
+  assert.equal(ctx.messages.length, 2);
+  ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id);
+  assert.equal(ctx.calendar.info(ctx.id).appLink, ''); assert.equal(ctx.calendar.info(ctx.id).deleting, true);
+  await ctx.calendar.drain();
+  assert.equal(ctx.events.size, 0); assert.equal(ctx.job().status, 'deleted'); assert.equal(ctx.job().event_id, '');
+  assert.notEqual(ctx.job().event_key, key);
+  const count = ctx.calls.length; ctx.calendar.enqueue(ctx.id); await ctx.calendar.drain(); assert.equal(ctx.calls.length, count);
+  ctx.store.run("UPDATE requirements SET status='open',planned_date='2028-02-01',deadline_date='2028-02-15' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id);
+  await ctx.calendar.drain(); await ctx.notifications.drain();
+  const event = [...ctx.events.values()][0]; assert.deepEqual(event.start_time, { date: '2028-02-01' }); assert.deepEqual(event.end_time, { date: '2028-02-16' });
+  assert.equal(ctx.job().status, 'synced'); assert.equal(ctx.messages.length, 4);
+  assert.equal(ctx.calendar.info(ctx.id).messages.sent, 2);
+  const creates = ctx.calls.filter(call => call.method === 'POST' && call.url.pathname.endsWith('/events'));
+  assert.equal(creates.length, 2); assert.notEqual(creates[0].url.searchParams.get('idempotency_key'), creates[1].url.searchParams.get('idempotency_key'));
+});
+
+test('failed or lost deletion responses resume after restart, and reopening waits for the old deletion before creating a new event', async t => {
+  const ctx = fixture(t); await ctx.calendar.drain();
+  ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id);
+  assert.ok(ctx.notifications.list().every(job => job.status === 'skipped'));
+  ctx.controls.failDelete = 1; await ctx.calendar.drain(); assert.equal(ctx.events.size, 1); assert.equal(ctx.job().delete_pending, 1);
+  ctx.store.run("UPDATE requirements SET status='open',planned_date='2028-03-01',deadline_date='2028-03-05' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id);
+  assert.equal(ctx.calendar.info(ctx.id).appLink, '');
+  ctx.controls.loseDeleteResponse = 1; await ctx.calendar.drain(); assert.equal(ctx.events.size, 0); assert.equal(ctx.job().event_id, 'event_mock');
+  ctx.store.db.close(); ctx.store = openStore(ctx.root); ctx.notifications = createNotifications(ctx.store, ctx.config); ctx.calendar = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications);
+  ctx.ready(); await ctx.calendar.drain(); assert.equal(ctx.job().event_id, ''); assert.equal(ctx.job().status, 'pending'); assert.equal(ctx.events.size, 0);
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 1); assert.equal(ctx.job().status, 'synced');
+  await ctx.notifications.drain(); assert.equal(ctx.messages.length, 2);
+});
+
+test('closing before any creation makes no Feishu calls, while closing after a lost create response recovers and deletes that same event', async t => {
+  const empty = fixture(t); empty.store.run("UPDATE requirements SET status='closed' WHERE id=?", empty.id); empty.calendar.enqueue(empty.id);
+  await empty.calendar.drain(); assert.equal(empty.calls.length, 0); assert.equal(empty.job().status, 'deleted');
+  const ctx = fixture(t); ctx.controls.failCreateResponse = 1; await ctx.calendar.drain();
+  const key = ctx.job().event_key; assert.equal(ctx.events.size, 1); assert.ok(ctx.job().creating_event);
+  ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id); await ctx.calendar.drain();
+  assert.equal(ctx.events.size, 0); assert.equal(ctx.job().status, 'deleted');
+  const creates = ctx.calls.filter(call => call.method === 'POST' && call.url.pathname.endsWith('/events'));
+  assert.equal(creates.length, 2); assert.ok(creates.every(call => call.url.searchParams.get('idempotency_key') === key));
+  assert.ok(!ctx.calls.some(call => call.url.pathname.endsWith('/attendees') && call.method === 'POST'));
+});
+
+test('a close during event creation stops invitations and the next worker deletes the event', async t => {
+  const ctx = fixture(t);
+  ctx.controls.onRequest = ({ url, method }) => {
+    if (method === 'POST' && url.pathname.endsWith('/events')) { ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id); }
+  };
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 1); assert.equal(ctx.job().status, 'pending');
+  assert.ok(!ctx.calls.some(call => call.url.pathname.endsWith('/attendees')));
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 0); assert.equal(ctx.job().status, 'deleted'); assert.equal(ctx.notifications.list().length, 0);
+});
+
+test('an upgrade queues existing closed events for deletion and never recreates them on later restarts', async t => {
+  const ctx = fixture(t); await ctx.calendar.drain();
+  ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", ctx.id);
+  ctx.store.run("UPDATE metadata SET value='2' WHERE key='requirement_calendar_fields_version'");
+  ctx.calendar = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications);
+  assert.equal(ctx.job().delete_pending, 1); assert.equal(ctx.calendar.list()[0].app_link, '');
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 0); assert.equal(ctx.job().status, 'deleted');
+  const count = ctx.calls.length;
+  ctx.calendar = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications);
+  await ctx.calendar.drain(); assert.equal(ctx.calls.length, count);
+});
+
+test('closing while message authentication is in flight cancels the queued calendar card before sending', async t => {
+  const ctx = fixture(t); await ctx.calendar.drain();
+  const original = ctx.config.notificationFetch;
+  ctx.config.notificationFetch = async (url, options) => {
+    if (url.includes('tenant_access_token')) { ctx.store.run("UPDATE requirements SET status='closed' WHERE id=?", ctx.id); ctx.calendar.enqueue(ctx.id); }
+    return original(url, options);
+  };
+  ctx.notifications = createNotifications(ctx.store, ctx.config); await ctx.notifications.drain();
+  assert.equal(ctx.messages.length, 0); assert.ok(ctx.notifications.list().every(job => job.status === 'skipped'));
 });
 
 test('old notification schema migrates without losing queued jobs and supports independent requirement subjects', t => {
@@ -310,4 +422,54 @@ test('old notification schema migrates without losing queued jobs and supports i
   assert.equal(store.one('SELECT COUNT(*) AS count FROM notifications WHERE requirement_id=?', requirement.id).count, 8);
   assert.equal(store.one('SELECT COUNT(*) AS count FROM notifications WHERE version_id IS NULL').count, 8);
   assert.deepEqual(store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('deleting a requirement removes its event with retry across restart and never recreates it', async t => {
+  const ctx = fixture(t); await ctx.calendar.drain();
+  assert.equal(ctx.events.size, 1);
+  ctx.store.run('UPDATE requirements SET deleted_at=? WHERE id=?', now(), ctx.id); ctx.calendar.enqueue(ctx.id);
+  assert.equal(ctx.calendar.info(ctx.id), null); assert.equal(ctx.calendar.list()[0].app_link, '');
+  ctx.controls.failDelete = 1; await ctx.calendar.drain();
+  assert.equal(ctx.events.size, 1); assert.equal(ctx.job().delete_pending, 1);
+  ctx.store.db.close(); ctx.store = openStore(ctx.root);
+  ctx.notifications = createNotifications(ctx.store, ctx.config); ctx.calendar = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications);
+  ctx.ready(); await ctx.calendar.drain(); await ctx.notifications.drain();
+  assert.equal(ctx.events.size, 0); assert.equal(ctx.job().status, 'deleted'); assert.equal(ctx.messages.length, 0);
+  const calls = ctx.calls.length;
+  ctx.calendar.enqueue(ctx.id); ctx.calendar.enqueueForUser('preview-employee');
+  ctx.calendar = createRequirementCalendar(ctx.store, ctx.config, ctx.notifications); await ctx.calendar.drain();
+  assert.equal(ctx.calls.length, calls); assert.equal(ctx.events.size, 0);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('deleting during calendar creation stops invitations and cleans the created event on the next run', async t => {
+  const ctx = fixture(t);
+  ctx.controls.onRequest = ({ url, method }) => {
+    if (method === 'POST' && url.pathname.endsWith('/events')) {
+      ctx.store.run('UPDATE requirements SET deleted_at=? WHERE id=?', now(), ctx.id); ctx.calendar.enqueue(ctx.id);
+    }
+  };
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 1);
+  assert.ok(!ctx.calls.some(call => call.url.pathname.endsWith('/attendees')));
+  await ctx.calendar.drain(); assert.equal(ctx.events.size, 0); assert.equal(ctx.job().status, 'deleted');
+  assert.equal(ctx.calendar.info(ctx.id), null); assert.equal(ctx.messages.length, 0);
+});
+
+test('a failed in-flight notification cannot requeue notifications canceled by requirement deletion', async t => {
+  const ctx = fixture(t); await ctx.calendar.drain();
+  const original = ctx.config.notificationFetch;
+  let attempts = 0;
+  ctx.config.notificationFetch = async (url, options) => {
+    if (url.includes('tenant_access_token')) return original(url, options);
+    attempts++;
+    ctx.store.tx(() => {
+      ctx.store.run('UPDATE requirements SET deleted_at=? WHERE id=?', now(), ctx.id);
+      ctx.store.run("UPDATE notifications SET status='skipped' WHERE requirement_id=? AND status IN ('pending','failed')", ctx.id);
+      ctx.calendar.enqueue(ctx.id);
+    });
+    throw new Error('lost response after deletion');
+  };
+  ctx.notifications = createNotifications(ctx.store, ctx.config);
+  await ctx.notifications.drain(); await ctx.notifications.drain();
+  assert.equal(attempts, 1); assert.ok(ctx.notifications.list().every(job => job.status === 'skipped'));
 });

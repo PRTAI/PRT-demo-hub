@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { now, parse } from './db.mjs';
 import { feishuDocumentLink } from '../shared/requirement-links.mjs';
+import { createWikiApi } from './feishu-wiki-api.mjs';
 
 const text = (content, url) => ({ text_run: { content, ...(url ? { text_element_style: { link: { url } } } : {}) } });
 const key = value => createHash('sha256').update(value).digest('hex').slice(0, 32);
@@ -18,6 +19,7 @@ function paragraphs(value) {
 
 export function createRequirementWiki(store, config) {
   const { one, all, run } = store;
+  let exportDocuments;
   store.db.exec(`CREATE TABLE IF NOT EXISTS requirement_wiki (
     requirement_id TEXT PRIMARY KEY REFERENCES requirements(id),
     space_id TEXT NOT NULL DEFAULT '', parent_token TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '',
@@ -33,11 +35,13 @@ export function createRequirementWiki(store, config) {
     block_ids TEXT NOT NULL DEFAULT '[]', synced_content TEXT NOT NULL DEFAULT '[]', pending_content TEXT NOT NULL DEFAULT ''
   );`);
   function enqueue(id) {
+    if (!one('SELECT 1 FROM requirements WHERE id=? AND deleted_at IS NULL', id)) return;
     run(`INSERT INTO requirement_wiki(requirement_id,updated_at) VALUES(?,?) ON CONFLICT(requirement_id)
       DO UPDATE SET generation=generation+1,status='pending',attempts=0,next_at=0,error='',updated_at=excluded.updated_at`, id, now());
+    exportDocuments?.enqueue(id);
   }
   // Existing requirements are created only on an explicit sync; upgrading does not flood the wiki.
-  function enqueueExisting(id) { if (one('SELECT 1 FROM requirement_wiki WHERE requirement_id=?', id)) enqueue(id); }
+  function enqueueExisting(id) { if (one('SELECT 1 FROM requirement_wiki WHERE requirement_id=?', id) || exportDocuments?.hasTarget(id)) enqueue(id); }
   function prepareExport(id) {
     const job = one('SELECT status FROM requirement_wiki WHERE requirement_id=?', id);
     if (job?.status === 'pending') run('UPDATE requirement_wiki SET next_at=0 WHERE requirement_id=?', id);
@@ -45,49 +49,34 @@ export function createRequirementWiki(store, config) {
     return one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', id).generation;
   }
   function configurationError() {
+    if (exportDocuments) return '';
     if (!config.appId || !config.appSecret) return '未配置飞书应用凭据，请管理员配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET';
     if (feishuDocumentLink(config.requirementWikiSampleUrl)?.type !== 'wiki') return '未配置有效的 FEISHU_REQUIREMENT_WIKI_SAMPLE_URL，请填写 sample 的飞书知识库链接';
     return '';
   }
   function enqueueForAsset(id) {
-    for (const row of all('SELECT ar.requirement_id FROM asset_requirements ar JOIN requirement_wiki w ON w.requirement_id=ar.requirement_id WHERE ar.asset_id=?', id)) enqueue(row.requirement_id);
+    for (const row of all('SELECT requirement_id FROM asset_requirements WHERE asset_id=?', id)) enqueueExisting(row.requirement_id);
   }
   function enqueueForUser(id) {
-    for (const row of all('SELECT r.id FROM requirements r JOIN requirement_wiki w ON w.requirement_id=r.id WHERE r.publisher_id=? OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=r.id AND ra.user_id=?)', id, id)) enqueue(row.id);
+    for (const row of all('SELECT r.id FROM requirements r WHERE r.publisher_id=? OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=r.id AND ra.user_id=?)', id, id)) enqueueExisting(row.id);
   }
   function info(id) {
+    if (exportDocuments) return exportDocuments.info(id);
     const row = one('SELECT status,error,url,synced_at FROM requirement_wiki WHERE requirement_id=?', id);
     return row ? { status: row.status, error: row.error, url: feishuDocumentLink(row.url)?.url || '', syncedAt: row.synced_at } : { status: 'not_created', error: '', url: '', syncedAt: null };
   }
   function retry(id) {
+    if (exportDocuments) return exportDocuments.retry(id);
     const row = one('SELECT status FROM requirement_wiki WHERE requirement_id=?', id);
     if (row?.status === 'pending') return false;
     enqueue(id); return true;
   }
-  const list = () => all('SELECT w.requirement_id,r.title FROM requirement_wiki w JOIN requirements r ON r.id=w.requirement_id ORDER BY w.updated_at DESC LIMIT 100').map(row => ({ ...row, ...info(row.requirement_id) }));
+  const list = () => all(`SELECT r.id AS requirement_id,r.title FROM requirements r WHERE r.deleted_at IS NULL AND (EXISTS(SELECT 1 FROM requirement_wiki w WHERE w.requirement_id=r.id)
+    ${exportDocuments ? 'OR EXISTS(SELECT 1 FROM requirement_document_sync s WHERE s.requirement_id=r.id)' : ''}) ORDER BY r.updated_at DESC LIMIT 100`).map(row => ({ ...row, ...info(row.requirement_id) }));
   const people = id => all(`SELECT u.* FROM users u WHERE u.enabled=1 AND u.deleted_at IS NULL AND
     (u.id=(SELECT publisher_id FROM requirements WHERE id=?) OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=? AND ra.user_id=u.id)) ORDER BY u.id`, id, id).filter(user => !user.open_id.startsWith('preview:'));
-  const call = config.wikiFetch || fetch;
-  let token = '', expires = 0, running = null;
-  async function tokenFor() {
-    if (token && expires > Date.now()) return token;
-    if (!config.appId || !config.appSecret) throw new Error('未配置飞书应用凭据');
-    const response = await call('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app_id: config.appId, app_secret: config.appSecret }) });
-    const data = await response.json();
-    if (!response.ok || data.code !== 0 || !data.tenant_access_token) throw new Error(`飞书文档应用鉴权失败 (${data.code || response.status})`);
-    token = data.tenant_access_token; expires = Date.now() + Math.max(0, (data.expire || 7200) - 120) * 1000;
-    return token;
-  }
-  async function request(resource, method = 'GET', body) {
-    const bearer = await tokenFor();
-    const response = await call('https://open.feishu.cn/open-apis/' + resource, { method, redirect: 'error', signal: AbortSignal.timeout(15000), headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearer}` }, ...(body ? { body: JSON.stringify(body) } : {}) });
-    const data = await response.json();
-    if (!response.ok || data.code !== 0) {
-      token = '';
-      throw new Error(`飞书需求文档同步失败 (${data.code || response.status})，请检查知识库节点、新版文档和协作者权限，并发布应用版本`);
-    }
-    return data.data || {};
-  }
+  const request = createWikiApi(config);
+  let running = null;
   async function destination(job) {
     if (job.space_id) return job;
     const sample = feishuDocumentLink(config.requirementWikiSampleUrl);
@@ -122,7 +111,8 @@ export function createRequirementWiki(store, config) {
     if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) throw new Error('未配置有效的平台访问地址');
     const files = all('SELECT f.id,f.original_name FROM files f JOIN requirement_files rf ON rf.file_id=f.id WHERE rf.requirement_id=? ORDER BY rf.created_at,rf.file_id', requirement.id);
     const elements = files.flatMap((file, index) => [...(index ? [text('\n')] : []), text(file.original_name, new URL(`/api/requirements/${requirement.id}/documents/${file.id}/download`, origin).href)]);
-    return { title: requirement.title, summary: [text(requirement.title)], files: elements.length ? elements : [text('尚未上传需求文档；上传后由平台同步下载链接。')] };
+    const status = { open: '进行中', needs_update: '待更新', delivered: '已交付', closed: '已关闭' }[requirement.status] || requirement.status;
+    return { title: requirement.title, summary: [text(requirement.title), text(`\n状态：${status}`)], files: elements.length ? elements : [text('尚未上传需求文档；上传后由平台同步下载链接。')] };
   }
   async function contentFor(job, requirement) {
     const root = `docx/v1/documents/${encodeURIComponent(job.document_id)}/blocks`, content = initialContent(requirement);
@@ -167,6 +157,7 @@ export function createRequirementWiki(store, config) {
         ...(description.summary ? paragraphs('简介\n' + description.summary) : []),
         ...(description.content ? paragraphs('数据说明\n' + description.content) : []),
         ...(description.costEstimate ? paragraphs('成本预估\n' + description.costEstimate) : []),
+        ...(description.dataVolume ? paragraphs('数据量级\n' + description.dataVolume) : []),
         ...(description.difficulty ? paragraphs('难度说明\n' + description.difficulty) : []),
         ...(description.notes ? paragraphs('注意事项\n' + description.notes) : [])
       ];
@@ -232,7 +223,7 @@ export function createRequirementWiki(store, config) {
   }
   async function sync(job) {
     const requirement = one('SELECT * FROM requirements WHERE id=?', job.requirement_id);
-    if (!requirement) return;
+    if (!requirement || requirement.deleted_at) return;
     const linked = await nodeFor(job);
     await contentFor(linked, requirement);
     await demosFor(linked);
@@ -245,14 +236,18 @@ export function createRequirementWiki(store, config) {
       catch (error) {
         const attempts = job.attempts + 1;
         const message = /^(飞书|未配置)/.test(error.message) ? error.message : '飞书需求文档网络请求失败，请稍后重试';
-        run('UPDATE requirement_wiki SET status=?,attempts=?,next_at=?,error=? WHERE requirement_id=? AND generation=?', attempts >= 5 ? 'failed' : 'pending', attempts, Date.now() + Math.min(300000, 15000 * 2 ** attempts), message, job.requirement_id, job.generation);
+        run('UPDATE requirement_wiki SET status=?,attempts=?,next_at=?,error=? WHERE requirement_id=? AND generation=?', error.retryable === false || attempts >= 5 ? 'failed' : 'pending', attempts, Date.now() + Math.min(300000, 15000 * 2 ** attempts), message, job.requirement_id, job.generation);
       }
     }
   }
   function drain() {
     if (config.demoMode) return Promise.resolve();
+    if (exportDocuments) return exportDocuments.drain();
     if (!running) running = processJobs().finally(() => { running = null; });
     return running;
   }
-  return { enqueue, enqueueExisting, enqueueForAsset, enqueueForUser, prepareExport, configurationError, info, list, retry, drain, start() { const timer = setInterval(() => drain().catch(() => console.error('Requirement document worker failed')), 5000); timer.unref(); return () => { clearInterval(timer); return running; }; } };
+  return { enqueue, enqueueExisting, enqueueForAsset, enqueueForUser, prepareExport, configurationError, info, list, retry, drain,
+    hasExportTarget: id => !!exportDocuments?.hasTarget(id), useExportDocuments(value) { exportDocuments = value; },
+    start() { const timer = setInterval(() => drain().catch(() => console.error('Requirement document worker failed')), 5000); timer.unref(); return () => { clearInterval(timer); return Promise.all([running, exportDocuments?.drain()]); }; }
+  };
 }

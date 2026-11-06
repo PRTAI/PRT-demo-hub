@@ -6,7 +6,7 @@ import { setupHarnessSso } from './harness-sso.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
-export const publicUser = user => user ? { id: user.id, name: user.name, avatar: user.avatar, roles: parse(user.roles, []), supervisorId: user.supervisor_id, enabled: !!user.enabled, deletedAt: user.deleted_at || null, revision: user.revision } : null;
+export const publicUser = user => user ? { id: user.id, name: user.name, avatar: user.avatar, roles: parse(user.roles, []), supervisorId: user.supervisor_id, enabled: !!user.enabled, deletedAt: user.deleted_at || null, revision: user.revision, virtual: user.account_type === 'virtual' } : null;
 
 export function setupAuth(app, store, config) {
   const { one, all, run, tx } = store;
@@ -17,18 +17,20 @@ export function setupAuth(app, store, config) {
   const origins = [...new Set([config.origin, config.publicOrigin, config.intranetOrigin].filter(Boolean))];
   const requestOrigin = req => origins.find(origin => new URL(origin).host === req.get('host')) || config.origin;
   const documentTokens = new Map();
+  if (!all('PRAGMA table_info(oauth_states)').some(column => column.name === 'document_user_id')) store.db.exec("ALTER TABLE oauth_states ADD COLUMN document_user_id TEXT NOT NULL DEFAULT ''");
+  if (!all('PRAGMA table_info(oauth_states)').some(column => column.name === 'document_wiki')) store.db.exec('ALTER TABLE oauth_states ADD COLUMN document_wiki INTEGER NOT NULL DEFAULT 0');
   const harness = setupHarnessAuth(app, store, config);
   const getUser = req => {
     const delegated = harness.user(req);
     if (delegated) return delegated;
     const token = req.cookies[sessionName];
-    return token ? one('SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?', hash(token), Date.now()) : null;
+    return token ? one("SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>? AND u.account_type='human'", hash(token), Date.now()) : null;
   };
-  const issue = (res, user, tokenInfo) => {
+  const issue = (res, user, tokenInfo, personalDocument = false, documentWiki = false) => {
     const token = secret();
     run('DELETE FROM sessions WHERE expires<?', Date.now());
     run('INSERT INTO sessions VALUES(?,?,?,?)', hash(token), user.id, secret(), Date.now() + 8 * 3600000);
-    if (tokenInfo?.access_token) documentTokens.set(hash(token), { token: tokenInfo.access_token, expires: Date.now() + (tokenInfo.expires_in || 7200) * 1000 });
+    if (tokenInfo?.access_token) documentTokens.set(hash(token), { userId: user.id, token: tokenInfo.access_token, personalDocument, documentWiki, expires: Date.now() + Math.max(0, (tokenInfo.expires_in || 7200) - 120) * 1000 });
     for (const [key, value] of documentTokens) if (value.expires <= Date.now()) documentTokens.delete(key);
     res.cookie(sessionName, token, { ...cookies, maxAge: 8 * 3600000 });
   };
@@ -62,19 +64,27 @@ export function setupAuth(app, store, config) {
   });
   app.get('/api/auth/feishu', (req, res) => {
     if (!config.appId || !config.appSecret || !config.tenantKey) return res.redirect('/?authError=' + encodeURIComponent('尚未配置飞书应用，请联系管理员完成接入'));
+    const personalDocument = req.query.document_export === '1';
+    if (personalDocument && (!req.user?.enabled || req.user.deleted_at || !parse(req.user.roles, []).includes('pm') || req.query.harness_request !== undefined)) return res.status(403).json({ error: '仅已登录的项目经理可以授权导出个人需求文档' });
+    const batch = personalDocument && typeof req.query.export === 'string' ? one("SELECT destination_url FROM requirement_exports WHERE id=? AND user_id=? AND destination='personal'", req.query.export, req.user.id) : null;
+    const documentWiki = personalDocument && !!(batch ? batch.destination_url : config.requirementExportWikiParentUrl);
     const state = secret(), verifier = secret();
     run('DELETE FROM oauth_states WHERE expires<?', Date.now());
     const origin = requestOrigin(req);
     let returnPath = platformPath({ requirementId: typeof req.query.requirement === 'string' ? req.query.requirement : '', demoId: typeof req.query.demo === 'string' ? req.query.demo : '' });
+    if (personalDocument && returnPath === '/' && req.query.view === 'requirements') returnPath = '/?view=requirements';
     if (req.query.harness_request !== undefined) {
       try { returnPath = harnessSso.returnPath(req.query.harness_request); }
       catch { return res.status(400).json({ error: 'Harness 登录请求无效，请重新登录' }); }
     }
-    run('INSERT INTO oauth_states(state,verifier,expires,origin,return_path) VALUES(?,?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin, returnPath);
+    run('INSERT INTO oauth_states(state,verifier,expires,origin,return_path,document_user_id,document_wiki) VALUES(?,?,?,?,?,?,?)', hash(state), verifier, Date.now() + 600000, origin, returnPath, personalDocument ? req.user.id : '', documentWiki ? 1 : 0);
     res.cookie(oauthName, state, { ...cookies, maxAge: 600000 });
     const url = new URL('https://accounts.feishu.cn/open-apis/authen/v1/authorize');
     url.search = new URLSearchParams({ client_id: config.appId, response_type: 'code', redirect_uri: origin + '/api/auth/callback', state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' }).toString();
-    if (config.feishuDocumentPreview || process.env.FEISHU_DOCUMENT_PREVIEW === 'true') url.searchParams.set('scope', 'docx:document:readonly wiki:wiki:readonly');
+    const scopes = config.feishuDocumentPreview || process.env.FEISHU_DOCUMENT_PREVIEW === 'true' ? ['docx:document:readonly', 'wiki:wiki:readonly'] : [];
+    if (personalDocument) scopes.push('docx:document', 'docs:document.media:upload');
+    if (documentWiki) scopes.push('wiki:wiki');
+    if (scopes.length) url.searchParams.set('scope', scopes.join(' '));
     res.redirect(url.toString());
   });
   app.get('/api/auth/callback', async (req, res) => {
@@ -100,9 +110,19 @@ export function setupAuth(app, store, config) {
         return one('SELECT * FROM users WHERE open_id=?', info.data.open_id);
       });
       if (!user.enabled || user.deleted_at) return res.redirect('/?authError=' + encodeURIComponent('账号已停用或删除，请联系管理员'));
+      if (record.document_user_id && (record.document_user_id !== user.id || !parse(user.roles, []).includes('pm'))) return res.redirect('/?authError=' + encodeURIComponent('个人文档授权必须使用发起导出的项目经理本人的飞书账号'));
       if (req.cookies[sessionName]) run('DELETE FROM sessions WHERE token=?', hash(req.cookies[sessionName]));
-      issue(res, user, token); res.redirect(record.return_path || '/');
+      issue(res, user, token, !!record.document_user_id, !!record.document_wiki); res.redirect(record.return_path || '/');
     } catch { res.redirect('/?authError=' + encodeURIComponent('飞书身份获取失败，请稍后重试或联系管理员检查配置')); }
   });
-  return { getUser, documentToken(req) { const record = documentTokens.get(hash(req.cookies[sessionName] || '')); return record && record.expires > Date.now() ? record.token : null; } };
+  return { getUser,
+    documentTokenForUser(userId) {
+      const user = one('SELECT * FROM users WHERE id=?', userId);
+      if (!user?.enabled || user.deleted_at || !parse(user.roles, []).includes('pm')) return null;
+      for (const [key, record] of [...documentTokens].reverse()) if (record.userId === userId && record.personalDocument && record.expires > Date.now()
+        && one('SELECT 1 FROM sessions WHERE token=? AND user_id=? AND expires>?', key, userId, Date.now())) return record.token;
+      return null;
+    },
+    documentToken(req, personal = false, wiki = false) { const record = documentTokens.get(hash(req.cookies[sessionName] || '')); return record && record.expires > Date.now() && (!personal || record.personalDocument) && (!wiki || record.documentWiki) ? record.token : null; }
+  };
 }

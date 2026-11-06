@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowLeft, ArrowUpRight, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, Forward, Link2, Plus, Search, UploadCloud, Users, X } from 'lucide-react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowDownToLine, ArrowLeft, ArrowUpRight, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, Forward, Link2, Plus, Search, Trash2, UploadCloud, Users, X } from 'lucide-react';
 import { api, downloadFile, uploadRequirementDocument } from './api';
 import { Badge, Empty, ErrorBox, Loading, Modal, bytes, date, roleLabels } from './components';
 import { appendRequirementDocuments, droppedRequirementDocuments } from './requirement-documents.mjs';
@@ -7,7 +7,9 @@ import { ShareLink } from './ShareLink';
 import { textLinks, feishuDocumentLink } from '../shared/requirement-links.mjs';
 import { requirementDate, requirementDeadlineState } from '../shared/requirement-schedule.mjs';
 import { businessOwnerRoles, developmentOwnerRoles } from '../shared/requirement-owners.mjs';
+import { readRequirementList, saveRequirementList, requirementReturnTop, requirementListStorage } from './requirement-navigation.mjs';
 import './requirements.css';
+import { RequirementReplies } from './RequirementReplies';
 
 const blank = { title: '', content: '', category: '', businessUserIds: [], developmentUserIds: [], publishDate: '', deadlineDate: '' };
 const statusLabels = { open: '进行中', needs_update: '待更新', delivered: '已交付', closed: '已关闭' };
@@ -15,14 +17,41 @@ const statusLabel = status => statusLabels[status] || status;
 const statusOptions = [{ value: 'all', label: '全部需求' }, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))];
 function Pager({ data, onPage, busy }) { return <div className="table-footer"><span>共 {data.total} 项 · 第 {data.page} / {data.pages} 页</span><div className="pagination"><button type="button" className="icon-button" aria-label="上一页" disabled={busy || data.page <= 1} onClick={() => onPage(data.page - 1)}><ChevronLeft size={17}/></button><button type="button" className="icon-button" aria-label="下一页" disabled={busy || data.page >= data.pages} onClick={() => onPage(data.page + 1)}><ChevronRight size={17}/></button></div></div>; }
 
-export function RequirementPicker({ value, onChange, initialItems = [], disabled = false }) {
+export function RequirementPicker({ value, onChange, initialItems = [], disabled = false, autoCreate = false }) {
   const [query, setQuery] = useState(''), [page, setPage] = useState(1), [data, setData] = useState(null), [known, setKnown] = useState(initialItems), [error, setError] = useState(''), [loading, setLoading] = useState(true);
   useEffect(() => { const controller = new AbortController(); setLoading(true); const timer = setTimeout(() => api('/requirements?' + new URLSearchParams({ q: query, status: 'active', page: String(page) }), { signal: controller.signal }).then(result => { setData(result); setError(''); setKnown(items => [...items.filter(item => !result.items.some(next => next.id === item.id)), ...result.items]); }).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); }), query ? 200 : 0); return () => { clearTimeout(timer); controller.abort(); }; }, [query, page]);
-  return <section className="requirement-picker"><div className="requirement-picker-heading"><strong>关联需求</strong><span>可选多个；提交或发布前至少绑定一个需求</span></div><div className="requirement-tags">{value.map(id => <span key={id}>{known.find(item => item.id === id)?.title || '已选需求'}<button type="button" className="icon-button" aria-label={`移除需求 ${id}`} disabled={disabled} onClick={() => onChange(value.filter(item => item !== id))}><X size={13}/></button></span>)}</div><div className="search-box"><Search size={16}/><input aria-label="搜索可绑定需求" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} placeholder="按标题、内容或发布人搜索需求" disabled={disabled}/></div><ErrorBox>{error}</ErrorBox>{loading ? <Loading/> : <div className="requirement-options">{data?.items.map(item => <label key={item.id}><input type="checkbox" checked={value.includes(item.id)} disabled={disabled || (!value.includes(item.id) && value.length >= 20)} onChange={event => onChange(event.target.checked ? [...value, item.id] : value.filter(id => id !== item.id))}/><span><strong>{item.title}</strong><small>{item.publisher.name} · {item.category || '未分类'}</small></span></label>)}{!data?.items.length && <p className="muted">暂无匹配的进行中需求，请联系产品经理或商务发布。</p>}</div>}{data && data.pages > 1 && <Pager data={data} onPage={setPage} busy={loading}/>}</section>;
+  return <section className="requirement-picker"><div className="requirement-picker-heading"><strong>关联需求</strong><span>{autoCreate ? '选填；留空时，名称和文件保存成功后创建需求卡片，补充需求后再建日程' : '选填，可关联多个需求；不关联也可提交或发布'}</span></div><div className="requirement-tags">{value.map(id => <span key={id}>{initialItems.find(item => item.id === id)?.title || known.find(item => item.id === id)?.title || '已选需求'}{initialItems.find(item => item.id === id)?.awaitingDemo && '（待上传文件）'}<button type="button" className="icon-button" aria-label={`移除需求 ${id}`} disabled={disabled} onClick={() => onChange(value.filter(item => item !== id))}><X size={13}/></button></span>)}</div><div className="search-box"><Search size={16}/><input aria-label="搜索可绑定需求" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} placeholder="按标题、内容或发布人搜索需求" disabled={disabled}/></div><ErrorBox>{error}</ErrorBox>{loading ? <Loading/> : <div className="requirement-options">{data?.items.map(item => <label key={item.id}><input type="checkbox" checked={value.includes(item.id)} disabled={disabled || (!value.includes(item.id) && value.length >= 20)} onChange={event => onChange(event.target.checked ? [...value, item.id] : value.filter(id => id !== item.id))}/><span><strong>{item.title}</strong><small>{item.publisher.name} · {item.category || '未分类'}</small></span></label>)}{!data?.items.length && <p className="muted">暂无匹配的进行中需求，请联系产品经理或商务发布。</p>}</div>}{data && data.pages > 1 && <Pager data={data} onPage={setPage} busy={loading}/>}</section>;
 }
 
 export function RequirementsPage({ user, config, selectedId, refreshKey, onSelect, onOpenDemo, onCreateDemo, notify, onChanged, assignedOnly = false }) {
-  const [query, setQuery] = useState(''), [status, setStatus] = useState('all'), [page, setPage] = useState(1), [data, setData] = useState(null), [detail, setDetail] = useState(null), [editing, setEditing] = useState(null), [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [error, setError] = useState(''), [reload, setReload] = useState(0), [binding, setBinding] = useState(false);
+  const listStorageKey = `prt-requirement-list-${user.id}-${assignedOnly ? 'mine' : 'all'}`;
+  const [remembered] = useState(() => readRequirementList(requirementListStorage(), listStorageKey));
+  const [query, setQuery] = useState(remembered.query), [status, setStatus] = useState(remembered.status), [page, setPage] = useState(remembered.page), [data, setData] = useState(null), [detail, setDetail] = useState(null), [editing, setEditing] = useState(null), [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [error, setError] = useState(''), [reload, setReload] = useState(0), [binding, setBinding] = useState(false);
+  const returnAnchor = useRef(remembered.anchor), restoreList = useRef(!!remembered.anchor);
+  const [returningId, setReturningId] = useState(''), [reopening, setReopening] = useState(null);
+  useLayoutEffect(() => { if (selectedId) window.scrollTo({ top: 0, behavior: 'instant' }); }, [selectedId]);
+  useLayoutEffect(() => {
+    if (selectedId) return;
+    if (loading || !data || !restoreList.current || !returnAnchor.current) return;
+    const anchor = returnAnchor.current, card = document.getElementById('requirement-card-' + anchor.id);
+    window.scrollTo({ top: requirementReturnTop(anchor, card, window.scrollY), behavior: 'instant' });
+    if (card) setReturningId(anchor.id);
+    restoreList.current = false;
+  }, [selectedId, loading, data]);
+  useEffect(() => { if (!returningId) return; const timer = setTimeout(() => setReturningId(''), 2000); return () => clearTimeout(timer); }, [returningId]);
+  function selectRequirement(id) {
+    const card = document.getElementById('requirement-card-' + id);
+    returnAnchor.current = { id, y: window.scrollY, offset: card?.getBoundingClientRect().top || 0 }; restoreList.current = true;
+    saveRequirementList(requirementListStorage(), listStorageKey, { query, status, page, anchor: returnAnchor.current });
+    onSelect(id);
+  }
+  function updateList(next) {
+    restoreList.current = false; returnAnchor.current = null; setReturningId('');
+    saveRequirementList(requirementListStorage(), listStorageKey, { query, status, page, ...next, anchor: null });
+    if (next.query !== undefined) setQuery(next.query);
+    if (next.status !== undefined) setStatus(next.status);
+    if (next.page !== undefined) setPage(next.page);
+  }
   const [assigneeUsers, setAssigneeUsers] = useState([]), [pendingDocuments, setPendingDocuments] = useState([]), [uploadProgress, setUploadProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [exportJob, setExportJob] = useState(null), [exportRefresh, setExportRefresh] = useState(0);
@@ -48,7 +77,7 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
           if (controller.signal.aborted) return;
           try { sessionStorage.removeItem(exportStorageKey); } catch { /* Progress recovery is optional. */ }
           setExportJob(null); setReload(value => value + 1);
-          notify(result.preview ? '演示模式：已导出表格，未创建或更新外部飞书文档' : `Excel 已导出，已同步 ${result.completed} 条需求的飞书文档`);
+          notify(result.preview ? '演示模式：已导出表格，未创建或更新外部飞书文档' : `Excel 已导出，${result.completed} 条需求已导出到${result.destination === 'wiki' ? '指定的飞书目录' : '我的飞书云文档'}`);
         } else if (result.status === 'pending') timer = setTimeout(check, 2500);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -63,7 +92,7 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
     return () => { controller.abort(); clearTimeout(timer); };
   }, [exportJob?.id, exportRefresh, canExport, exportStorageKey]);
   useEffect(() => { if (canPublish) api('/requirements/assignees').then(result => setAssigneeUsers(result.items)).catch(error => setError(error.message)); }, [canPublish]);
-  useEffect(() => { const controller = new AbortController(); setLoading(true); setError(''); setDetail(null); setEditing(null); setBinding(false); const timer = setTimeout(() => { const url = selectedId ? `/requirements/${selectedId}` : '/requirements?' + new URLSearchParams({ q: query, status, assigned: assignedOnly ? '1' : '0', page: String(page) }); api(url, { signal: controller.signal }).then(result => selectedId ? setDetail(result) : setData(result)).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); }); }, !selectedId && query ? 200 : 0); return () => { clearTimeout(timer); controller.abort(); }; }, [selectedId, query, status, page, reload, refreshKey, assignedOnly]);
+  useEffect(() => { const controller = new AbortController(); setLoading(true); setError(''); setDetail(null); if (selectedId) setData(null); setEditing(null); setBinding(false); const timer = setTimeout(() => { const url = selectedId ? `/requirements/${selectedId}` : '/requirements?' + new URLSearchParams({ q: query, status, assigned: assignedOnly ? '1' : '0', page: String(page) }); api(url, { signal: controller.signal }).then(result => { if (!controller.signal.aborted) { if (selectedId) setDetail(result); else setData(result); } }).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); }); }, !selectedId && query ? 200 : 0); return () => { clearTimeout(timer); controller.abort(); }; }, [selectedId, query, status, page, reload, refreshKey, assignedOnly]);
   function refresh() { setReload(value => value + 1); onChanged(); }
   async function exportRequirements() {
     if (!canExport) return;
@@ -107,17 +136,52 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
     } catch (error) { setError(saved ? `需求内容已保存，未完成的文档上传可再次保存重试：${error.message}` : error.message); }
     finally { setBusy(false); }
   }
-  async function changeStatus(next) { if (next === detail.status) return; if (!window.confirm(`确认将需求状态修改为“${statusLabel(next)}”？`)) return; setBusy(true); setError(''); try { await api(`/requirements/${detail.id}/actions`, { method: 'POST', body: { revision: detail.revision, action: 'set_status', status: next } }); refresh(); notify('需求状态已更新'); } catch (error) { setError(error.message); } finally { setBusy(false); } }
+  async function applyStatus(next, dates = {}) { setBusy(true); setError(''); try { await api(`/requirements/${detail.id}/actions`, { method: 'POST', body: { revision: detail.revision, action: 'set_status', status: next, ...dates } }); setReopening(null); refresh(); notify(next === 'closed' ? '需求已关闭，正在删除飞书日程' : detail.status === 'closed' ? '需求已重新开启，正在发布新日程' : '需求状态已更新'); } catch (error) { setError(error.message); } finally { setBusy(false); } }
+  function changeStatus(next) {
+    if (next === detail.status) return;
+    if (detail.status === 'closed') { setError(''); setReopening({ status: next, publishDate: requirementDate(), deadlineDate: '' }); return; }
+    if (window.confirm(next === 'closed' ? '确认关闭需求并删除对应的飞书日程？' : `确认将需求状态修改为“${statusLabel(next)}”？`)) applyStatus(next);
+  }
+  async function deleteDocument(file) {
+    if (busy || !canPublish || !detail?.canDeleteDocuments) return;
+    if (!window.confirm(`确认删除需求文档「${file.name}」？删除后，该附件将从当前需求中移除。`)) return;
+    setBusy(true); setError('');
+    try {
+      const updated = await api(`/requirements/${detail.id}/documents/${file.id}`, { method: 'DELETE', body: { revision: detail.revision } });
+      setDetail(current => current?.id === updated.id ? { ...current, ...updated } : current);
+      notify('需求文档已删除');
+    } catch (error) { setError(error.message); }
+    finally { setBusy(false); }
+  }
+  async function deleteRequirement(requirement) {
+    if (busy || !canPublish || !requirement.canDelete) return;
+    if (!window.confirm(`确认删除需求「${requirement.title}」？\n删除后将从需求中心和我的需求中移除，并删除对应飞书日程。关联 Demo、原始文件及已导出的飞书文档会保留。`)) return;
+    setBusy(true); setError('');
+    try {
+      await api(`/requirements/${requirement.id}`, { method: 'DELETE', body: { revision: requirement.revision } });
+      setDetail(null); setBinding(false); setReopening(null);
+      if (selectedId === requirement.id) onSelect(null);
+      refresh(); notify('需求已删除，关联 Demo 已保留；对应飞书日程将后台删除');
+    } catch (error) { setError(error.message); }
+    finally { setBusy(false); }
+  }
   async function unbind(asset) { if (!window.confirm(`解除与「${asset.latest.description.title || '未命名 Demo'}」的绑定？`)) return; setBusy(true); setError(''); try { await api(`/requirements/${detail.id}/demos/${asset.id}`, { method: 'DELETE', body: { revision: asset.revision } }); refresh(); notify('绑定已解除'); } catch (error) { setError(error.message); } finally { setBusy(false); } }
   if (editing) return <RequirementForm editing={editing} setEditing={setEditing} config={config} assigneeUsers={assigneeUsers} pendingDocuments={pendingDocuments} setPendingDocuments={setPendingDocuments} uploadProgress={uploadProgress} error={error} busy={busy} save={save} cancelEdit={cancelEdit}/>;
   return <>
-    <section className="page-heading"><div><div className="eyebrow">BUSINESS REQUIREMENTS</div><h1>{assignedOnly ? '我的需求' : '需求中心'}<span className="heading-dot">.</span></h1><p>{assignedOnly ? '查看指定给当前账号的业务需求和交付进展。' : '从业务需求出发，关联数据样例并跟进演示准备。'}</p></div>{canPublish && !assignedOnly && <button className="button primary" disabled={busy} onClick={() => { setError(''); setPendingDocuments([]); setEditing({ ...blank }); }}><Plus size={17}/>发布需求</button>}</section>
+    <section className="page-heading"><div><div className="eyebrow">BUSINESS REQUIREMENTS</div><h1>{assignedOnly ? '我的需求' : '需求中心'}<span className="heading-dot">.</span></h1><p>{assignedOnly ? '查看指定给当前账号的业务需求和交付进展。' : user.roles.includes('supervisor') ? '查看分配给自己及各级下属的需求，跟进数据样例与交付进展。' : '从业务需求出发，关联数据样例并跟进演示准备。'}</p></div>{canPublish && !assignedOnly && <button className="button primary" disabled={busy} onClick={() => { setError(''); setPendingDocuments([]); setEditing({ ...blank }); }}><Plus size={17}/>发布需求</button>}</section>
     <ErrorBox>{error}</ErrorBox>
     {selectedId ? <>
       <button type="button" className="button requirement-back" onClick={() => onSelect(null)}><ArrowLeft size={16}/>返回需求列表</button>
-      {loading ? <Loading/> : detail && <RequirementDetail detail={detail} canCreateDemo={canCreateDemo} busy={busy} binding={binding} setBinding={setBinding} onCreateDemo={onCreateDemo} onOpenDemo={onOpenDemo} onEdit={() => { setPendingDocuments([]); setEditing({ ...detail, assignedUserIds: detail.assignedUsers.map(item => item.id) }); }} onStatus={changeStatus} onUnbind={unbind} onBound={() => { refresh(); notify('Demo 已绑定'); }} onForwarded={count => { refresh(); notify(count ? `需求已转发，新增关联 ${count} 人` : '所选人员已关联，无需重复转发'); }}/>}</> :
-      <RequirementList data={data} loading={loading} query={query} setQuery={value => { setQuery(value); setPage(1); }} status={status} setStatus={value => { setStatus(value); setPage(1); }} onSelect={onSelect} canPublish={canPublish} canExport={canExport} page={page} onPage={setPage} exporting={exporting} exportJob={exportJob} onExport={exportRequirements} onRetryExport={retryExport} onRefreshExport={() => { setError(''); setExportRefresh(value => value + 1); }} onCloseExport={closeExport}/>
+      {loading ? <Loading/> : detail && <RequirementDetail detail={detail} canDelete={canPublish && detail.canDelete} onDelete={deleteRequirement} canDeleteDocuments={canPublish && detail.canDeleteDocuments} onDeleteDocument={deleteDocument} canCreateDemo={canCreateDemo} canExport={canExport} busy={busy} binding={binding} setBinding={setBinding} onCreateDemo={onCreateDemo} onOpenDemo={onOpenDemo} onEdit={() => { setPendingDocuments([]); setEditing({ ...detail, assignedUserIds: detail.assignedUsers.map(item => item.id) }); }} onStatus={changeStatus} onUnbind={unbind} onBound={() => { refresh(); notify('Demo 已绑定'); }} onForwarded={count => { refresh(); notify(count ? `需求已转发，新增关联 ${count} 人` : '所选人员已关联，无需重复转发'); }}/>}</> :
+      <RequirementList data={data} loading={loading} query={query} setQuery={value => updateList({ query: value, page: 1 })} status={status} setStatus={value => updateList({ status: value, page: 1 })} onSelect={selectRequirement} returningId={returningId} canPublish={canPublish} canExport={canExport} busy={busy} onDelete={deleteRequirement} page={page} onPage={value => updateList({ page: value })} exporting={exporting} exportJob={exportJob} onExport={exportRequirements} onRetryExport={retryExport} onRefreshExport={() => { setError(''); setExportRefresh(value => value + 1); }} onCloseExport={closeExport}/>
     }
+    {reopening && <Modal title="重新开启需求并发布日程" busy={busy} onClose={() => { if (!busy) setReopening(null); }}><form className="modal-content" onSubmit={event => { event.preventDefault(); if (reopening.deadlineDate < reopening.publishDate) { setError('截止日期不能早于开始日期'); return; } applyStatus(reopening.status, { publishDate: reopening.publishDate, deadlineDate: reopening.deadlineDate }); }}>
+      <p className="muted">请重新设置本轮日程日期。旧日程删除完成后，平台会创建新日程并通知关联人员和发布人。</p>
+      <ErrorBox>{error}</ErrorBox>
+      <label className="field">开始日期 <b>*</b><input type="date" required min="1900-01-01" max="2199-12-31" value={reopening.publishDate} disabled={busy} onChange={event => setReopening({ ...reopening, publishDate: event.target.value })}/></label>
+      <label className="field">截止日期 <b>*</b><input type="date" required min={reopening.publishDate} max="2199-12-31" value={reopening.deadlineDate} disabled={busy} onChange={event => setReopening({ ...reopening, deadlineDate: event.target.value })}/></label>
+      <div className="requirement-actions"><button className="button" type="button" disabled={busy} onClick={() => setReopening(null)}>取消</button><button className="button primary" type="submit" disabled={busy}>{busy ? '提交中…' : '重新开启并发布日程'}</button></div>
+    </form></Modal>}
   </>;
 }
 
@@ -182,18 +246,18 @@ function OwnerPicker({ title, description, users, roles, selectedUsers, value, o
   </fieldset>;
 }
 
-function RequirementList({ data, loading, query, setQuery, status, setStatus, onSelect, canPublish, canExport, page, onPage, exporting, exportJob, onExport, onRetryExport, onRefreshExport, onCloseExport }) {
+function RequirementList({ data, loading, query, setQuery, status, setStatus, onSelect, returningId, canPublish, canExport, busy, onDelete, page, onPage, exporting, exportJob, onExport, onRetryExport, onRefreshExport, onCloseExport }) {
   return <section className="asset-panel requirements-panel">
-    <div className="filter-row"><div className="search-box"><Search size={17}/><input aria-label="搜索需求或负责人" placeholder="搜索负责人、需求标题、内容或发布人…" value={query} onChange={event => setQuery(event.target.value)}/></div><StatusMenu value={status} onChange={setStatus} ariaLabel="需求状态"/>{canExport && data?.canExport && <button type="button" className="button" disabled={loading || exporting || ['pending', 'ready'].includes(exportJob?.status) || !data?.total} onClick={onExport} title="同步当前筛选下的需求飞书文档，完成后导出全部结果"><ArrowDownToLine size={16}/>{exporting ? '提交中…' : exportJob?.status === 'pending' ? '同步文档中…' : exportJob?.status === 'ready' ? '下载中…' : '导出 Excel'}</button>}</div>
+    <div className="filter-row"><div className="search-box"><Search size={17}/><input aria-label="搜索需求或负责人" placeholder="搜索负责人、需求标题、内容或发布人…" value={query} onChange={event => setQuery(event.target.value)}/></div><StatusMenu value={status} onChange={setStatus} ariaLabel="需求状态"/>{canExport && data?.canExport && <button type="button" className="button" disabled={loading || exporting || !!exportJob || !data?.total} onClick={onExport} title="按配置的飞书位置导出当前筛选的全部需求，完成后下载 Excel"><ArrowDownToLine size={16}/>{exporting ? '提交中…' : exportJob?.status === 'pending' ? '导出文档中…' : exportJob?.status === 'ready' ? '下载中…' : '导出 Excel'}</button>}</div>
     {canExport && exportJob && <div className="requirement-export-progress" role="status" aria-live="polite">
-      <strong>{exportJob.status === 'ready' ? '文档同步完成，正在准备下载表格' : exportJob.status === 'failed' ? '部分飞书文档同步失败，请重试失败项' : '正在创建或更新筛选需求的飞书文档'}</strong>
+      <strong>{exportJob.status === 'ready' ? '飞书文档导出完成，正在准备下载表格' : exportJob.status === 'authorization_required' ? '请完成飞书文档授权，再继续本批导出' : exportJob.status === 'failed' ? '部分飞书文档导出失败，请重试未完成项' : `正在将筛选需求导出到${exportJob.destination === 'wiki' ? '指定的飞书目录' : '我的飞书云文档'}`}</strong>
       <p>{exportJob.total === undefined ? '正在恢复导出进度…' : `共 ${exportJob.total} 条需求 · 已完成 ${exportJob.completed} 条 · 等待 ${exportJob.pending} 条${exportJob.failed ? ` · 失败 ${exportJob.failed} 条` : ''}`}</p>
-      {exportJob.filters && <p>本次范围：{exportJob.filters.assigned === '1' ? '我的需求' : '需求中心'} · {exportJob.filters.status === 'all' ? '全部状态' : statusLabel(exportJob.filters.status)}{exportJob.filters.q ? ` · 搜索“${exportJob.filters.q}”` : ''}。完成后自动下载；后台同步期间可继续使用平台。</p>}
+      {exportJob.filters && <p>本次范围：{exportJob.filters.assigned === '1' ? '我的需求' : '需求中心'} · {exportJob.filters.status === 'all' ? '全部状态' : statusLabel(exportJob.filters.status)}{exportJob.filters.q ? ` · 搜索“${exportJob.filters.q}”` : ''}。文档保存到{exportJob.destination === 'wiki' ? <a href={exportJob.destinationUrl} target="_blank" rel="noopener noreferrer">指定的飞书知识库目录</a> : '当前项目经理的个人云文档'}，全部成功后自动下载表格；导出期间可继续使用平台。</p>}
       {!!exportJob.errors?.length && <details open={exportJob.status === 'failed'}><summary>查看失败需求{exportJob.failed > exportJob.errors.length ? `（仅显示前 ${exportJob.errors.length} 条）` : ''}</summary><ul>{exportJob.errors.map(item => <li key={item.requirementId}><a href={`/?view=requirements&requirement=${encodeURIComponent(item.requirementId)}`} target="_blank" rel="noopener noreferrer">{item.title}</a>：{item.error}</li>)}</ul></details>}
-      <div className="requirement-actions"><button type="button" className="button small" disabled={exporting} onClick={onRefreshExport}>{exportJob.status === 'ready' ? '重新下载' : '刷新导出进度'}</button>{exportJob.failed > 0 && <button type="button" className="button primary small" disabled={exporting} onClick={onRetryExport}>重试失败项</button>}<button type="button" className="button small" disabled={exporting} onClick={onCloseExport} title="关闭后后台文档同步仍会继续">关闭进度</button></div>
+      <div className="requirement-actions">{exportJob.authorizationRequired && <><a className="button primary small" href={exportJob.authorizationUrl}>{exportJob.destination === 'wiki' ? '授权飞书文档与知识库' : '授权我的飞书云文档'}</a><button type="button" className="button primary small" disabled={exporting} onClick={onRetryExport}>已授权，继续本批导出</button></>}<button type="button" className="button small" disabled={exporting} onClick={onRefreshExport}>{exportJob.status === 'ready' ? '重新下载' : '刷新导出进度'}</button>{exportJob.status === 'failed' && <button type="button" className="button primary small" disabled={exporting} onClick={onRetryExport}>重试未完成项</button>}<button type="button" className="button small" disabled={exporting} onClick={onCloseExport} title="关闭后已开始的文档导出仍会继续">关闭进度</button></div>
     </div>}
     <p className="requirement-list-hint">按截止日期从早到晚排列，未设置截止日期的靠后，已关闭需求排在最后。</p>
-    {loading ? <Loading/> : data?.items.length ? <div className="requirement-list">{data.items.map(item => <article className="requirement-row" key={item.id}>
+    {loading ? <Loading/> : data?.items.length ? <div className="requirement-list">{data.items.map(item => <article id={'requirement-card-' + item.id} className={`requirement-row${item.status === 'closed' ? ' requirement-closed' : ''}${returningId === item.id ? ' requirement-returning' : ''}`} key={item.id}>
       <div className="requirement-list-main">
         <button className="requirement-title" onClick={() => onSelect(item.id)}><strong>{item.title}</strong><span className={`requirement-status ${item.status}`}>{statusLabel(item.status)}</span></button>
         <p>{renderLinkedText(item.content)}</p>
@@ -202,8 +266,8 @@ function RequirementList({ data, loading, query, setQuery, status, setStatus, on
         {item.wiki?.url && <a className="requirement-wiki-link" href={item.wiki.url} target="_blank" rel="noopener noreferrer"><FileText size={14}/>飞书协作文档<ExternalLink size={12}/></a>}
         <ShareLink url={item.shareUrl}/>
       </div>
-      <button className="requirement-count" onClick={() => onSelect(item.id)} aria-label={`查看需求 ${item.title}`}>{item.demoCount} 个可见 Demo<ArrowUpRight size={16}/></button>
-    </article>)}</div> : <Empty title="暂无匹配需求" description={canPublish ? '尝试搜索负责人姓名，或发布新的业务需求。' : '仅展示指定给你的需求，可按负责人姓名搜索。'}/>}
+      <div className="requirement-card-actions"><button className="requirement-count" onClick={() => onSelect(item.id)} aria-label={`查看需求 ${item.title}`}>{item.demoCount} 个可见 Demo<ArrowUpRight size={16}/></button>{canPublish && item.canDelete && <button type="button" className="button small danger-text" aria-label={`删除需求 ${item.title}`} disabled={busy} onClick={() => onDelete(item)}><Trash2 size={14}/>删除需求</button>}</div>
+    </article>)}</div> : <Empty title="暂无匹配需求" description={canPublish ? '尝试搜索负责人姓名，或发布新的业务需求。' : '展示你有权查看的需求，可按负责人姓名搜索。'}/>}
     {data && <Pager data={data} onPage={onPage} busy={loading}/>}
   </section>;
 }
@@ -258,9 +322,15 @@ function RequirementCalendarStatus({ requirement }) {
     catch (error) { setError(error.message); }
     finally { setBusy(''); }
   }
+  if (!requirement.calendarReady && !calendar?.deleting) return requirement.status === 'closed' ? null : <div className="requirement-calendar"><strong>飞书日历</strong><p>此需求由独立上传 Demo 创建，暂不创建日程。商务或项目经理补充需求内容或上传需求文档后，再自动创建日程。</p></div>;
+  if (requirement.status === 'closed') return !calendar || calendar.status === 'deleted' ? null : <div className="requirement-calendar">
+    <strong>关闭需求的日程清理</strong><p role="status">{calendar?.status === 'failed' ? '原日程删除失败，请检查权限后重试。' : '正在删除原飞书日程，失败时自动重试。'}</p>
+    {(calendar?.error || error) && <p className="requirement-calendar-error">{error || calendar.error}</p>}
+    {requirement.canRetryCalendar && calendar?.status === 'failed' && <button type="button" className="button small" disabled={!!busy} onClick={retryCalendar}>重试删除日程</button>}
+  </div>;
   return <div className="requirement-calendar">
     <div><CalendarDays size={16}/><strong>飞书日历</strong><span>发布日期：{requirement.publishDate}（全天）</span><RequirementDeadline requirement={requirement}/></div>
-    <p role="status">{({ pending: '正在同步，失败时会自动重试', synced: '已关联日程，并同步负责人及发布人', failed: requirement.canRetryCalendar ? '同步失败，修复下方问题后可点击“重试同步”' : '同步失败，请联系商务、项目经理或管理员检查后重试' })[calendar?.status] || '等待同步'}</p>
+    <p role="status">{calendar?.deleting ? '正在删除上一轮日程，完成后将按新日期发布日程；失败时自动重试' : ({ pending: '正在同步，失败时会自动重试', synced: '已关联日程，并同步负责人及发布人', failed: requirement.canRetryCalendar ? '同步失败，修复下方问题后可点击“重试同步”' : '同步失败，请联系商务、项目经理或管理员检查后重试' })[calendar?.status] || '等待同步'}</p>
     {calendar?.messages && (calendar.messages.pending + calendar.messages.sent + calendar.messages.failed > 0) && <p role="status">日程卡片：已发送 {calendar.messages.sent} 人{calendar.messages.pending > 0 ? `，等待发送 ${calendar.messages.pending} 人` : ''}{calendar.messages.failed > 0 ? `，${calendar.messages.failed} 人发送失败，请管理员在“平台设置 → 飞书通知”重试` : ''}。</p>}
     {(calendar?.error || error) && <p className="requirement-calendar-error">{error || calendar.error}</p>}
     {calendar?.error?.includes('99991672') && <p>此错误需要飞书应用管理员在开放平台开通日历接口的应用身份权限，并发布新版本使权限生效。</p>}
@@ -272,46 +342,93 @@ function RequirementWikiStatus({ requirement }) {
   const [wiki, setWiki] = useState(requirement.wiki), [busy, setBusy] = useState(false), [error, setError] = useState('');
   useEffect(() => { setWiki(requirement.wiki); setError(''); }, [requirement.id, requirement.wiki]);
   useEffect(() => {
-    if (wiki?.status !== 'pending') return;
+    if (wiki?.status !== 'pending' && !(wiki?.mode === 'export' && wiki.status === 'not_created')) return;
     const controller = new AbortController();
     const timer = setInterval(() => api(`/requirements/${requirement.id}/wiki`, { signal: controller.signal }).then(result => { setWiki(result); setError(''); }).catch(error => { if (!controller.signal.aborted) setError(error.message); }), 5000);
     return () => { clearInterval(timer); controller.abort(); };
-  }, [requirement.id, wiki?.status]);
+  }, [requirement.id, wiki?.status, wiki?.mode]);
   async function sync() {
     setBusy(true); setError('');
     try { setWiki(await api(`/requirements/${requirement.id}/wiki/retry`, { method: 'POST' })); }
     catch (error) { setError(error.message); }
     finally { setBusy(false); }
   }
+  if (wiki?.mode === 'export') return <div className="requirement-calendar requirement-wiki">
+    <strong><FileText size={15}/>飞书需求文档</strong>
+    <p role="status">{({ not_created: '尚未导出飞书文档。请项目经理先使用上方的导出按钮，成功后将自动关联同一份文档。', pending: '正在更新已导出的同一份文档，完成后刷新飞书页面即可查看。', synced: '已同步到导出的文档。需求状态、正文、负责人、附件及关联 Demo 的已保存内容变化后，会自动更新。', failed: '文档同步失败，请查看下方原因后重试。', authorization_required: '文档创建者的用户授权已失效，请重新授权后重试同步。' })[wiki.status] || '等待同步'}</p>
+    {wiki.url && <p>同步沿用文档创建者 {wiki.ownerName} 的用户授权；请将人工补充写在平台生成的内容区域之外。原有飞书共享权限保留。</p>}
+    {(wiki.error || error) && <p className="requirement-calendar-error">{error || wiki.error}</p>}
+    <div>{wiki.url && <a className="button small" href={wiki.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={14}/>打开飞书文档</a>}{wiki.authorizationRequired && wiki.canAuthorize && <a className="button small" href={wiki.authorizationUrl}>重新授权飞书文档</a>}{requirement.canSyncWiki && wiki.url && wiki.status !== 'pending' && <button type="button" className="button small" disabled={busy} onClick={sync}>{busy ? '提交中…' : '同步当前内容'}</button>}</div>
+  </div>;
   return <div className="requirement-calendar requirement-wiki">
     <strong><FileText size={15}/>飞书协作文档</strong>
     <p role="status">{({ not_created: '此历史需求尚未创建飞书文档，可点击下方按钮创建。', pending: '正在创建或同步飞书文档、Demo 内容及关联人员编辑权限，失败时自动重试。', synced: '文档已就绪，关联 Demo 上传文件或保存说明后会自动同步。', failed: '飞书文档同步失败，请检查知识库和文档权限后重试。' })[wiki?.status] || '等待同步'}</p>
-    <p>平台维护“需求简述”“需求文档”和“Demo 内容（平台自动同步）”区域，人工补充请写在其他区块。Demo 上传文件并保存说明后，自动同步数据概述、数据格式、成本预估、难度说明和注意事项；文件仍在平台，查看和下载需要相应权限。</p>
+    <p>平台维护“需求简述”“需求文档”和“Demo 内容（平台自动同步）”区域，人工补充请写在其他区块。Demo 上传文件并保存说明后，自动同步数据概述、数据格式、数据量级、成本预估、难度说明和注意事项；文件仍在平台，查看和下载需要相应权限。</p>
     {(wiki?.error || error) && <p className="requirement-calendar-error">{error || wiki.error}</p>}
     <div>{wiki?.url && <a className="button small" href={wiki.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={14}/>打开飞书文档</a>}{requirement.canSyncWiki && wiki?.status !== 'pending' && <button type="button" className="button small" disabled={busy} onClick={sync}>{busy ? '提交中…' : wiki?.status === 'not_created' ? '创建飞书文档' : wiki?.status === 'failed' ? '重试文档同步' : '同步文档与人员'}</button>}</div>
   </div>;
 }
 
-function RequirementDetail({ detail, canCreateDemo, busy, binding, setBinding, onCreateDemo, onOpenDemo, onEdit, onStatus, onUnbind, onBound, onForwarded }) {
+function PersonalRequirementExport({ requirement }) {
+  const [job, setJob] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const requestSequence = useRef(0);
+  const endpoint = `/requirements/${requirement.id}/personal-document-export`;
+  useEffect(() => {
+    const controller = new AbortController(), sequence = ++requestSequence.current;
+    setJob(null); setError(''); setBusy(false);
+    api(endpoint, { signal: controller.signal }).then(result => { if (!controller.signal.aborted && sequence === requestSequence.current) setJob(result); }).catch(error => { if (!controller.signal.aborted && sequence === requestSequence.current) setError(error.message); });
+    return () => { controller.abort(); requestSequence.current++; };
+  }, [endpoint, requirement]);
+  useEffect(() => {
+    if (job?.status !== 'pending') return;
+    const controller = new AbortController();
+    const timer = setInterval(() => {
+      const sequence = ++requestSequence.current;
+      api(endpoint, { signal: controller.signal }).then(result => { if (!controller.signal.aborted && sequence === requestSequence.current) { setJob(result); setError(''); } }).catch(error => { if (!controller.signal.aborted && sequence === requestSequence.current) setError(error.message); });
+    }, 2500);
+    return () => { clearInterval(timer); controller.abort(); };
+  }, [endpoint, job?.status, requirement]);
+  async function start() {
+    const sequence = ++requestSequence.current;
+    setBusy(true); setError('');
+    try { const result = await api(endpoint, { method: 'POST' }); if (sequence === requestSequence.current) setJob(result); }
+    catch (error) { if (sequence === requestSequence.current) setError(error.message); }
+    finally { if (sequence === requestSequence.current) setBusy(false); }
+  }
+  const wikiDestination = job?.destination === 'wiki';
+  return <div className="requirement-personal-export">
+    <button type="button" className="button" disabled={busy || job?.status === 'pending' || job?.status === 'uncertain' && !wikiDestination} onClick={start}><FileText size={16}/>{busy ? '提交中…' : job?.status === 'pending' ? '正在导出飞书文档…' : wikiDestination ? '导出到指定飞书目录' : '导出到我的飞书云文档'}</button>
+    <p className="muted">按模板导出当前需求、负责人、数据说明、数据量级和成本，并将需求文档及 Demo 文件作为附件上传到飞书。{wikiDestination && <>位置：<a href={job.destinationUrl} target="_blank" rel="noopener noreferrer">指定的飞书知识库目录</a>。</>}</p>
+    {job?.status === 'pending' && <p role="status">正在导出：正文 {job.completedBlocks || 0}/{job.totalBlocks || 0} · 附件 {job.completedAttachments || 0}/{job.totalAttachments || 0}。大文件上传可能需要较长时间，可继续使用平台。</p>}
+    {(job?.status === 'authorization_required' || job?.authorizationRequired) && <p>需要项目经理本人的飞书文档授权。<a className="button small" href={job.authorizationUrl}>{wikiDestination ? '授权飞书文档与知识库' : '授权我的飞书云文档'}</a><span>授权返回后，再点击导出即可。</span></p>}
+    {job?.status === 'ready' && <p role="status">已保存到{wikiDestination ? '指定的飞书知识库目录' : '你的飞书云文档'}。<a className="button small" href={job.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={14}/>打开导出文档</a></p>}
+    {job?.status === 'outdated' && <p role="status">需求或关联 Demo 已更新，请重新导出当前版本。旧导出文档保留，当前入口将在新版本导出成功后更新。</p>}
+    <ErrorBox>{error || job?.error}</ErrorBox>
+  </div>;
+}
+
+function RequirementDetail({ detail, canDelete, onDelete, canDeleteDocuments, onDeleteDocument, canCreateDemo, canExport, busy, binding, setBinding, onCreateDemo, onOpenDemo, onEdit, onStatus, onUnbind, onBound, onForwarded }) {
   const [forwarding, setForwarding] = useState(false);
   return <>
     <section className="settings-card requirement-detail">
       <div className="requirement-title"><h2>{detail.title}</h2><span className={`requirement-status ${detail.status}`}>{statusLabel(detail.status)}</span><ShareLink url={detail.shareUrl}/></div>
-      <div className="requirement-meta requirement-list-meta"><span>发布人 {detail.publisher.name} · {detail.category || '未分类'} · 发布日期 {detail.publishDate}</span><RequirementDeadline requirement={detail}/><span>更新于 {date(detail.updatedAt)}</span></div>
+      {canExport && <PersonalRequirementExport key={detail.id} requirement={detail}/>}
+      <div className="requirement-meta requirement-list-meta"><span>发布人 {detail.publisher.name} · {detail.category || '未分类'} · 发布日期 {detail.publishDate}{detail.source === 'demo' ? ' · 由 Demo 自动创建' : ''}</span><RequirementDeadline requirement={detail}/><span>更新于 {date(detail.updatedAt)}</span></div>
       <div className="requirement-content">{renderLinkedText(detail.content)}</div>
       <RequirementLinkPreviews key={`${detail.id}:${detail.revision}`} requirement={detail}/>
+      <RequirementReplies key={detail.id} requirementId={detail.id}/>
       <RequirementOwners requirement={detail}/>
       <RequirementCalendarStatus requirement={detail}/>
       <RequirementWikiStatus requirement={detail}/>
-      {(detail.canManage || detail.canStatusManage || detail.canForward) && <div className="requirement-actions">{detail.canForward && <button type="button" className="button" disabled={busy} onClick={() => setForwarding(true)}><Forward size={16}/>转发需求</button>}{detail.canManage && <button className="button" disabled={busy} onClick={onEdit}>编辑需求 / 上传文档</button>}{detail.canStatusManage && <StatusMenu value={detail.status} onChange={onStatus} ariaLabel="修改需求状态" disabled={busy} filter={false}/>}</div>}
+      {(detail.canManage || detail.canStatusManage || detail.canForward || canDelete) && <div className="requirement-actions">{detail.canForward && <button type="button" className="button" disabled={busy} onClick={() => setForwarding(true)}><Forward size={16}/>转发需求</button>}{detail.canManage && <button className="button" disabled={busy} onClick={onEdit}>编辑需求 / 上传文档</button>}{detail.canStatusManage && <StatusMenu value={detail.status} onChange={onStatus} ariaLabel="修改需求状态" disabled={busy} filter={false}/>} {canDelete && <button type="button" className="button danger-text" aria-label={`删除需求 ${detail.title}`} disabled={busy} onClick={() => onDelete(detail)}><Trash2 size={16}/>删除需求</button>}</div>}
     </section>
     <section className="settings-card requirement-documents">
       <div className="panel-title"><div><h2><FileText size={18}/>需求文档</h2><span>{detail.documents?.length || 0} 个文件</span></div></div>
-      {detail.documents?.length ? <div className="requirement-document-list">{detail.documents.map(file => <a className="requirement-document" key={file.id} href={`/api/requirements/${detail.id}/documents/${file.id}/download`}><FileText size={16}/><span>{file.name}<small>{Math.ceil(file.size / 1024)} KB</small></span><ArrowDownToLine size={16}/></a>)}</div> : <p className="muted">暂无需求文档</p>}
+      {detail.documents?.length ? <div className="requirement-document-list">{detail.documents.map(file => <div className="requirement-document-row" key={file.id}><a className="requirement-document" href={`/api/requirements/${detail.id}/documents/${file.id}/download`}><FileText size={16}/><span>{file.name}<small>{Math.ceil(file.size / 1024)} KB</small></span><ArrowDownToLine size={16}/></a>{canDeleteDocuments && <button type="button" className="button small danger-text" aria-label={`删除需求文档 ${file.name}`} disabled={busy} onClick={() => onDeleteDocument(file)}><Trash2 size={14}/>删除</button>}</div>)}</div> : <p className="muted">暂无需求文档</p>}
     </section>
     <section className="asset-panel requirement-demos">
       <div className="panel-title"><div><h2>关联 Demo</h2><span>{detail.demos.length} 个可见 Demo</span></div>{['open', 'needs_update'].includes(detail.status) && <div className="requirement-actions">{canCreateDemo && <button className="button" onClick={() => onCreateDemo(detail)}><Plus size={16}/>上传 Demo</button>}{detail.canManage && <button className="button primary" onClick={() => setBinding(value => !value)}><Link2 size={16}/>{binding ? '收起绑定' : '绑定已有 Demo'}</button>}</div>}</div>
-      <p className="requirement-access-note">仅展示你有权查看的 Demo；员工或主管可上传 Demo 并默认关联当前需求，需求内容与文档仍由发布人管理。</p>
+      <p className="requirement-access-note">仅展示你有权查看的 Demo；员工或主管可上传 Demo 并默认关联当前需求。{detail.source === 'demo' ? '该需求由独立上传 Demo 自动创建，项目经理和商务可编辑需求、管理文档及调整负责人。' : '需求内容编辑及文档上传由具有项目经理或商务角色的原发布人负责；项目经理、商务均可删除需求文档。'}</p>
       {binding && detail.canManage && <BindDemo requirement={detail} onBound={onBound}/>}
       {detail.demos.length ? <div className="requirement-demo-list">{detail.demos.map(asset => <div key={asset.id}><button className="requirement-demo-open" onClick={() => onOpenDemo(asset.id)}><div><strong>{asset.latest.description.title || '未命名 Demo'}</strong><small>{asset.owner.name} · V{asset.latest.number}</small></div><Badge status={asset.latest.status}/><ArrowUpRight size={16}/></button>{detail.canManage && <button className="button small" disabled={busy} onClick={() => onUnbind(asset)}>解除绑定</button>}</div>)}</div> : <Empty title="还没有可见的关联 Demo" description={detail.canManage ? '可以绑定已有 Demo。' : '此处仅展示你有权查看的关联 Demo。'}/>}
     </section>

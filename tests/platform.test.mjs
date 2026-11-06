@@ -8,6 +8,7 @@ import { createApp } from '../server/app.mjs';
 import { createBackup } from '../scripts/backup.mjs';
 import { restoreBackup } from '../scripts/restore.mjs';
 import ExcelJS from 'exceljs';
+import { requirementDate } from '../shared/requirement-schedule.mjs';
 
 const origin = 'http://127.0.0.1:5173';
 async function fixture(t, options = {}) {
@@ -22,9 +23,14 @@ async function fixture(t, options = {}) {
   }
   return { ...ctx, root, login };
 }
-const description = { title: '测试 Demo', summary: '需求验收数据', category: '通用数据', tags: ['测试'], content: '# 数据概述\n字段和内容说明\n\n# 数据格式\n```text\ndata.csv  # 数据文件\n```', usage: '', costEstimate: '低成本，使用现有工具即可处理。', difficulty: '低难度，具备基础数据分析能力即可。', notes: '', changes: '', schemaVersion: 1 };
+const description = { title: '测试 Demo', summary: '需求验收数据', category: '通用数据', tags: ['测试'], content: '# 数据概述\n字段和内容说明\n\n# 数据格式\n```text\ndata.csv  # 数据文件\n```', usage: '', costEstimate: '低成本，使用现有工具即可处理。', dataVolume: '以两周产量评估，预计可交付 5000 条，按当前人员及复核流程估算。', difficulty: '低难度，具备基础数据分析能力即可。', notes: '', changes: '', schemaVersion: 1 };
 async function create(client) { const requirements = (await client.get('/requirements?status=open').expect(200)).body.items; return (await client.send('post', '/assets', { description, requirementIds: [requirements[0].id] }).expect(201)).body; }
 async function detail(client, id) { return (await client.get('/assets/' + id).expect(200)).body; }
+async function standalone(client, input = {}) {
+  const demo = (await client.send('post', '/assets', { description, ...input }).expect(201)).body;
+  const uploaded = (await client.upload(demo.versionId, 0, 'sample.csv', Buffer.from('id,value\n1,2')).expect(201)).body;
+  return { ...demo, autoCreatedRequirementId: uploaded.autoCreatedRequirementId, requirements: uploaded.requirements };
+}
 async function action(client, vid, revision, action, reason = '') { return client.send('post', `/versions/${vid}/actions`, { revision, action, reason }); }
 
 test('my requirements only include assignments, including for product managers and business publishers', async t => {
@@ -44,7 +50,7 @@ test('requirement status changes allow PM and business roles, enforce revisions,
   for (const client of [employee, manager, admin]) await client.send('post', `/requirements/${requirement.id}/actions`, { revision: requirement.revision, action: 'set_status', status: 'delivered' }).expect(403);
   for (const status of ['needs_update', 'delivered', 'closed', 'open']) {
     const previous = requirement.revision;
-    requirement = (await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: previous, action: 'set_status', status }).expect(200)).body;
+    requirement = (await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: previous, action: 'set_status', status, ...(requirement.status === 'closed' ? { publishDate: '2028-01-01', deadlineDate: '2028-01-15' } : {}) }).expect(200)).body;
     assert.equal(requirement.status, status);
     assert.ok((await pm.get('/requirements?status=' + status).expect(200)).body.items.some(item => item.id === requirement.id));
     await business.send('post', `/requirements/${requirement.id}/actions`, { revision: previous, action: 'set_status', status: 'needs_update' }).expect(409);
@@ -52,6 +58,26 @@ test('requirement status changes allow PM and business roles, enforce revisions,
   requirement = (await business.send('post', `/requirements/${requirement.id}/actions`, { revision: requirement.revision, action: 'set_status', status: 'needs_update' }).expect(200)).body;
   await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201);
   assert.ok((await employee.get('/requirements?status=active').expect(200)).body.items.some(item => item.id === requirement.id));
+});
+
+test('reopening a closed requirement requires a newly supplied valid date range atomically for both action forms', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  for (const actionName of ['reopen', 'set_status']) {
+    const requirement = await publishRequirement(pm, { publishDate: '2026-10-01', deadlineDate: '2026-10-15' });
+    const endpoint = `/requirements/${requirement.id}/actions`;
+    await pm.send('post', endpoint, { revision: 0, action: 'close' }).expect(200);
+    assert.equal((await pm.get(`/requirements/${requirement.id}`).expect(200)).body.calendar.appLink, '');
+    for (const dates of [{}, { publishDate: '2028-01-01' }, { publishDate: '2028-01-10', deadlineDate: '2028-01-01' }, { publishDate: '2028-02-30', deadlineDate: '2028-03-01' }]) {
+      await pm.send('post', endpoint, { revision: 1, action: actionName, status: 'open', ...dates }).expect(400);
+      const row = ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id);
+      assert.equal(row.status, 'closed'); assert.equal(row.revision, 1); assert.equal(row.planned_date, '2026-10-01');
+    }
+    const client = actionName === 'set_status' ? business : pm;
+    const reopened = (await client.send('post', endpoint, { revision: 1, action: actionName, status: 'open', publishDate: '2028-03-01', deadlineDate: '2028-03-15' }).expect(200)).body;
+    assert.equal(reopened.publishDate, '2028-03-01'); assert.equal(reopened.deadlineDate, '2028-03-15'); assert.equal(reopened.status, 'open');
+    const job = ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+    assert.equal(job.delete_pending, 1); assert.equal(job.status, 'pending'); // Old deletion must finish first.
+  }
 });
 
 test('rejecting a Demo changes only linked open requirements to needs update and publication keeps their status', async t => {
@@ -128,6 +154,7 @@ test('identity: anonymous denied, unassigned waiting, production never allows pr
 });
 test('permissions: employee ownership, selected supervisor, PM management and admin no file access', async t => {
   const f = await fixture(t), employee = await f.login('preview-employee'), other = await f.login('preview-other'), manager = await f.login('preview-other-manager'), pm = await f.login('preview-pm'), admin = await f.login('preview-admin');
+  f.store.run("DELETE FROM requirement_assignees WHERE user_id='preview-other'"); // This test has no assigned subordinate in the other team.
   const list = (await employee.get('/assets')).body; assert.ok(list.length); assert.ok(list.every(a => a.owner.id === 'preview-employee'));
   const item = list[0], v = item.latest;
   await other.get('/assets/' + item.id).expect(404); await manager.get('/assets/' + item.id).expect(404); await admin.get('/assets/' + item.id).expect(404);
@@ -176,13 +203,25 @@ test('concurrent writes and repeated transitions fail without overwriting', asyn
   const results = await Promise.all([employee.send('put', `/versions/${a.versionId}`, { revision: 0, description: { ...description, title: 'A' } }), employee.send('put', `/versions/${a.versionId}`, { revision: 0, description: { ...description, title: 'B' } })]);
   assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
 });
-test('repeated create request returns one asset', async t => {
+test('repeated create requests reserve one Demo and create one automatic card only after a file commits, without a calendar', async t => {
   const f = await fixture(t), employee = await f.login('preview-employee');
   const body = { description, requestId: '95729d44-49c6-4827-b941-d0e5c8932526' };
-  const first = await employee.send('post', '/assets', body).expect(201);
-  const second = await employee.send('post', '/assets', body).expect(201);
-  assert.equal(first.body.id, second.body.id);
+  const count = f.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  const [first, second] = await Promise.all([employee.send('post', '/assets', body).expect(201), employee.send('post', '/assets', body).expect(201)]);
+  assert.deepEqual(first.body, second.body);
   assert.equal(f.store.one('SELECT COUNT(*) AS n FROM assets WHERE id=?', first.body.id).n, 1);
+  assert.equal(f.store.one('SELECT COUNT(*) AS n FROM requirements').n, count);
+  assert.equal(first.body.autoCreatedRequirementId, null); assert.deepEqual(first.body.requirements, []);
+  const uploaded = (await employee.upload(first.body.versionId, 0).expect(201)).body;
+  const id = uploaded.autoCreatedRequirementId;
+  assert.equal(uploaded.requirements[0].id, id);
+  assert.equal(f.store.one('SELECT COUNT(*) AS n FROM requirements').n, count + 1);
+  assert.equal(f.store.one('SELECT COUNT(*) AS n FROM notifications WHERE requirement_id=?', id).n, 1);
+  assert.equal(f.store.one('SELECT generation FROM requirement_calendar WHERE requirement_id=?', id), undefined);
+  assert.equal(f.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', id).generation, 1);
+  assert.equal(f.store.one("SELECT COUNT(*) AS n FROM events WHERE asset_id=? AND action='requirement_publish'", first.body.id).n, 1);
+  await employee.send('post', '/assets', { ...body, description: { ...description, title: '重复请求不能变更内容' } }).expect(409);
+  assert.equal(f.store.one('SELECT COUNT(*) AS n FROM requirements').n, count + 1);
 });
 test('CSRF and foreign origins rejected', async t => {
   const f = await fixture(t), employee = await f.login('preview-employee');
@@ -198,7 +237,10 @@ test('selected reviewer keeps access independently from the employee directory s
   const a = await create(employee); await employee.upload(a.versionId, 0).expect(201); assert.equal((await action(employee, a.versionId, 1, 'submit')).status, 200);
   u = users.find(u => u.id === 'preview-employee');
   await admin.send('put', '/admin/users/' + u.id, { ...u, supervisorId: 'preview-other-manager' }).expect(200);
-  await old.get('/assets/' + a.id).expect(200); await next.get('/assets/' + a.id).expect(404);
+  const inherited = (await next.get('/assets/' + a.id).expect(200)).body;
+  assert.equal(inherited.canManage, false); assert.equal(inherited.canEdit, false);
+  await action(next, a.versionId, 2, 'publish').then(result => assert.equal(result.status, 403));
+  await old.get('/assets/' + a.id).expect(200);
   assert.equal((await action(old, a.versionId, 2, 'publish')).status, 200);
   const d = await detail(employee, a.id);
   await admin.send('post', `/admin/assets/${a.id}/transfer`, { revision: d.revision, ownerId: 'preview-other', reason: '人员交接' }).expect(200);
@@ -422,6 +464,7 @@ test('business can view and download every Demo but cannot change data', async t
   assert.equal(detail.body.latest.id, detail.body.versions[0].id);
   assert.equal(detail.body.latest.description.content, description.content);
   assert.equal(detail.body.latest.description.difficulty, description.difficulty);
+  assert.equal(detail.body.latest.description.dataVolume, description.dataVolume);
   for (const hidden of ['costEstimate', 'notes', 'changes', 'usage']) assert.equal(detail.body.latest.description[hidden], undefined);
   assert.deepEqual(detail.body.events, []); assert.deepEqual(detail.body.submissions, []);
   await business.get(`/versions/${demo.versionId}/files/${detail.body.latest.files[0].id}/download`).expect(200);
@@ -443,7 +486,7 @@ test('RAG search only returns visible descriptions and can use an LLM answer', a
   await employee.send('post', '/search/rag', { question: '一' }).expect(400);
 });
 
-test('RAG search excludes offline Demos', async t => {
+test('RAG excludes offline versions while including their newly editable draft', async t => {
   const ctx = await fixture(t), manager = await ctx.login('preview-manager');
   const marker = 'OFFLINESEARCHZXQ999';
   const requirementId = (await manager.get('/requirements').expect(200)).body.items[0].id;
@@ -453,6 +496,10 @@ test('RAG search excludes offline Demos', async t => {
   let result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
   assert.ok(result.body.sources.some(asset => asset.id === demo.id));
   assert.equal((await action(manager, demo.versionId, 2, 'unpublish', '停止使用')).status, 200);
+  result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
+  const source = result.body.sources.find(asset => asset.id === demo.id);
+  assert.ok(source); assert.equal(source.latest.status, 'draft');
+  ctx.store.run("UPDATE versions SET status='offline' WHERE asset_id=?", demo.id);
   result = await manager.send('post', '/search/rag', { question: marker }).expect(200);
   assert.ok(!result.body.sources.some(asset => asset.id === demo.id));
 });
@@ -784,7 +831,7 @@ test('only product managers and business users can publish requirements and publ
   const closed = await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 1, action: 'close' }).expect(200);
   assert.equal(closed.body.status, 'closed');
   await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 2, action: 'close' }).expect(409);
-  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 2, action: 'reopen' }).expect(200);
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 2, action: 'reopen', publishDate: '2028-01-01', deadlineDate: '2028-01-15' }).expect(200);
   const events = ctx.store.all("SELECT action FROM events WHERE detail LIKE ?", `%${requirement.id}%`).map(item => item.action);
   for (const action of ['requirement_publish', 'requirement_edit', 'requirement_close', 'requirement_reopen']) assert.ok(events.includes(action));
 });
@@ -880,38 +927,349 @@ test('Demo requirement bindings support many-to-many and stay within Demo visibi
   await employee.send('post', `/requirements/${second.id}/demos`, { assetId: hidden.id, revision: 0 }).expect(404);
 });
 
+test('standalone Demo saves create assigned requirement cards while explicitly selected requirements do not create extra cards', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-other-manager'), pm = await ctx.login('preview-pm'), other = await ctx.login('preview-other');
+  for (const [client, userId, input, fields] of [
+    [employee, 'preview-employee', {}, description],
+    [manager, 'preview-other-manager', { requirementIds: [] }, { title: '独立上传压缩包', costEstimate: '以两周时间参考，1人投入' }]
+  ]) {
+    const before = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+    const demo = await standalone(client, { description: fields, ...input });
+    assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, before + 1);
+    assert.deepEqual((await detail(client, demo.id)).requirements, demo.requirements);
+    const card = (await client.get(`/requirements/${demo.autoCreatedRequirementId}`).expect(200)).body;
+    assert.equal(card.source, 'demo'); assert.equal(card.title, fields.title || '未命名 Demo');
+    assert.equal(card.content, fields.summary || card.title); assert.equal(card.category, fields.category || '');
+    assert.equal(card.status, 'open'); assert.equal(card.publishDate, requirementDate(card.createdAt)); assert.equal(card.deadlineDate, '');
+    assert.equal(card.calendarReady, false); assert.equal(card.calendar, null);
+    assert.equal(card.publisher.id, userId); assert.deepEqual(card.developmentOwners.map(user => user.id), [userId]); assert.deepEqual(card.businessOwners, []);
+    assert.equal(card.canManage, false); assert.equal(card.canStatusManage, false);
+    assert.ok((await client.get('/requirements?assigned=1').expect(200)).body.items.some(item => item.id === card.id));
+    assert.ok((await pm.get('/requirements').expect(200)).body.items.some(item => item.id === card.id));
+    await other.get(`/requirements/${card.id}`).expect(403);
+    await client.send('put', `/requirements/${card.id}`, { ...requirementContent, revision: 0 }).expect(403);
+    await client.send('post', `/requirements/${card.id}/actions`, { revision: 0, action: 'set_status', status: 'closed' }).expect(403);
+  }
+  const selected = await publishRequirement(pm, { assignedUserIds: ['preview-employee'] });
+  const count = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [selected.id, selected.id] }).expect(201)).body;
+  assert.equal(demo.autoCreatedRequirementId, null); assert.deepEqual(demo.requirements.map(item => item.id), [selected.id]);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, count);
+});
+
+test('standalone creation requires a real name and a committed nonempty file before creating any card or publication jobs', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee');
+  const before = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  const assets = ctx.store.one('SELECT COUNT(*) AS n FROM assets').n;
+  for (const title of ['', '  \n ', undefined]) await employee.send('post', '/assets', { description: { ...description, title } }).expect(400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM assets').n, assets);
+  const draft = (await employee.send('post', '/assets', { description }).expect(201)).body;
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, before);
+  assert.deepEqual(draft.requirements, []);
+  await employee.upload(draft.versionId, 0, 'empty.zip', Buffer.alloc(0)).expect(400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, before);
+  await employee.send('put', `/versions/${draft.versionId}`, { revision: 0, description: { ...description, title: ' ' } }).expect(400);
+  const uploaded = (await employee.upload(draft.versionId, 0).expect(201)).body;
+  assert.ok(uploaded.autoCreatedRequirementId);
+  const second = (await employee.upload(draft.versionId, 1, 'another.zip').expect(201)).body;
+  assert.equal(second.autoCreatedRequirementId, null);
+  assert.deepEqual(second.requirements, uploaded.requirements);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, before + 1);
+  assert.equal(ctx.store.one('SELECT 1 FROM requirement_calendar WHERE requirement_id=?', uploaded.autoCreatedRequirementId), undefined);
+});
+
+test('metadata-only saves, empty files and interrupted multipart uploads never create requirement cards or publication jobs', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const tables = ['requirements', 'notifications', 'requirement_calendar', 'requirement_wiki'];
+  const counts = () => tables.map(table => ctx.store.one(`SELECT COUNT(*) AS n FROM ${table}`).n), before = counts();
+  const draft = (await employee.send('post', '/assets', { description: { ...description, title: '没有文件的保存' } }).expect(201)).body;
+  await employee.send('put', `/versions/${draft.versionId}`, { revision: 0, assetRevision: 0, description, requirementIds: [] }).expect(200);
+  await employee.send('post', `/versions/${draft.versionId}/files`, {}).set('X-Revision', '1').expect(400);
+  await employee.upload(draft.versionId, 1, 'empty.zip', Buffer.alloc(0)).expect(400);
+  const csrf = (await employee.get('/auth/me').expect(200)).body.csrf;
+  await employee.agent.post(`/api/versions/${draft.versionId}/files`)
+    .set('Origin', origin).set('X-Requested-With', 'PRT').set('X-CSRF-Token', csrf).set('X-Revision', '1')
+    .set('Content-Type', 'multipart/form-data; boundary=unfinished-upload')
+    .send('--unfinished-upload\r\nContent-Disposition: form-data; name="file"; filename="interrupted.zip"\r\nContent-Type: application/octet-stream\r\n\r\npartial bytes')
+    .expect(400);
+  assert.deepEqual(counts(), before);
+  assert.deepEqual((await detail(employee, draft.id)).requirements, []);
+  assert.deepEqual((await detail(employee, draft.id)).latest.files, []);
+  assert.deepEqual(fs.readdirSync(path.join(ctx.store.root, 'tmp')), []);
+  await employee.send('post', '/requirements', requirementContent).expect(403);
+  for (const client of [employee, pm]) assert.equal((await client.get('/requirements?q=' + encodeURIComponent(description.title)).expect(200)).body.total, 0);
+  const uploaded = (await employee.upload(draft.versionId, 1).expect(201)).body;
+  assert.ok(uploaded.autoCreatedRequirementId);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, before[0] + 1);
+});
+
+test('automatic cards require complete file bytes and roll back the file, card and jobs together on storage failure', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee');
+  const draft = (await employee.send('post', '/assets', { description }).expect(201)).body;
+  const count = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  const rename = fs.renameSync;
+  const brokenStorage = t.mock.method(fs, 'renameSync', (from, to) => { rename(from, to); fs.truncateSync(to, 0); });
+  await employee.upload(draft.versionId, 0).expect(409);
+  brokenStorage.mock.restore();
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, count);
+  assert.deepEqual((await detail(employee, draft.id)).latest.files, []);
+  assert.deepEqual((await detail(employee, draft.id)).requirements, []);
+  assert.deepEqual(fs.readdirSync(path.join(ctx.store.root, 'tmp')), []);
+  const uploaded = (await employee.upload(draft.versionId, 0).expect(201)).body;
+  assert.ok(uploaded.autoCreatedRequirementId);
+});
+
+test('removing the last Demo file withdraws an unfinished automatic card from lists and exports and reupload restores the same card', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const demo = await standalone(employee), id = demo.autoCreatedRequirementId;
+  const count = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  await employee.upload(demo.versionId, 1, 'second.csv').expect(201);
+  let current = await detail(employee, demo.id);
+  await employee.send('delete', `/versions/${demo.versionId}/files/${current.latest.files[0].id}`, { revision: 2 }).expect(200);
+  assert.ok((await employee.get('/requirements?assigned=1').expect(200)).body.items.some(item => item.id === id));
+  current = await detail(employee, demo.id);
+  await employee.send('delete', `/versions/${demo.versionId}/files/${current.latest.files[0].id}`, { revision: 3 }).expect(200);
+  for (const client of [employee, pm]) {
+    for (const assigned of ['0', '1']) assert.equal((await client.get('/requirements?' + new URLSearchParams({ q: description.title, assigned })).expect(200)).body.total, 0);
+    await client.get('/requirements/' + id).expect(403);
+  }
+  const emptyExport = (await pm.send('post', '/requirements/exports', { q: description.title }).expect(202)).body;
+  assert.equal(emptyExport.total, 0);
+  current = await detail(employee, demo.id);
+  assert.equal(current.requirements[0].id, id); assert.equal(current.requirements[0].awaitingDemo, true);
+  const another = (await employee.send('post', '/assets', { description, requirementIds: [] }).expect(201)).body;
+  await pm.send('post', `/requirements/${id}/demos`, { assetId: another.id, revision: 0 }).expect(409);
+  ctx.store.run("UPDATE users SET open_id='ou_test_employee' WHERE id='preview-employee'");
+  const calls = [], { createNotifications } = await import('../server/notifications.mjs');
+  const sender = createNotifications(ctx.store, { demoMode: false, appId: 'test', appSecret: 'test', notificationFetch: async (url, options) => {
+    calls.push(url);
+    return { ok: true, json: async () => url.includes('tenant_access_token') ? { code: 0, tenant_access_token: 'mock', expire: 7200 } : { code: 0 } };
+  } });
+  await sender.drain(); assert.equal(calls.length, 0);
+  // Saving metadata retains the suspended binding; retrying files reuses its ID.
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 4, assetRevision: current.revision, description, requirementIds: [id] }).expect(200);
+  const uploaded = (await employee.upload(demo.versionId, 5).expect(201)).body;
+  assert.equal(uploaded.autoCreatedRequirementId, null); assert.deepEqual(uploaded.requirements.map(item => item.id), [id]);
+  assert.equal(uploaded.requirements[0].awaitingDemo, undefined);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, count);
+  assert.equal((await employee.get('/requirements?assigned=1&q=' + encodeURIComponent(description.title)).expect(200)).body.total, 1);
+  assert.equal((await pm.send('post', '/requirements/exports', { q: description.title }).expect(202)).body.total, 1);
+  await sender.drain(); assert.equal(calls.filter(url => url.includes('/im/v1/messages')).length, 1);
+  await sender.drain(); assert.equal(calls.filter(url => url.includes('/im/v1/messages')).length, 1);
+  assert.equal(ctx.store.one('SELECT 1 FROM requirement_calendar WHERE requirement_id=?', id), undefined);
+});
+
+test('deleting Demo drafts hides only unfinished automatic cards and preserves manual and subsequently maintained requirements', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const demos = [];
+  for (const kind of ['unfinished', 'owners', 'content', 'document', 'manual']) {
+    const demo = kind === 'manual' ? await create(employee) : await standalone(employee);
+    const id = kind === 'manual' ? demo.requirements[0].id : demo.autoCreatedRequirementId;
+    if (kind === 'owners' || kind === 'content') {
+      const card = (await pm.get('/requirements/' + id).expect(200)).body;
+      await pm.send('put', '/requirements/' + id, { ...card, businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee'], ...(kind === 'content' ? { content: '项目经理补充的具体需求内容' } : {}) }).expect(200);
+    }
+    if (kind === 'document') await requirementUpload(pm, id);
+    await employee.send('delete', '/versions/' + demo.versionId, { revision: kind === 'manual' ? 0 : 1 }).expect(200);
+    demos.push({ id, kind });
+  }
+  const ids = (await pm.get('/requirements?pageSize=100').expect(200)).body.items.map(item => item.id);
+  for (const { id, kind } of demos) {
+    assert.equal(ids.includes(id), kind !== 'unfinished', kind);
+    assert.ok(ctx.store.one('SELECT id FROM requirements WHERE id=?', id));
+    await employee.get('/requirements/' + id).expect(kind === 'unfinished' ? 403 : 200);
+  }
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('legacy automatic cards without completed Demo files are excluded immediately while preserving their data and staged bindings', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const draft = (await employee.send('post', '/assets', { description }).expect(201)).body;
+  const time = new Date().toISOString(), ids = ['b21c1fd0-12d8-4fcf-b8e7-b4a32d48a1c1', 'b21c1fd0-12d8-4fcf-b8e7-b4a32d48a1c2'];
+  for (const id of ids) {
+    ctx.store.run("INSERT INTO requirements(id,title,content,publisher_id,created_at,updated_at,source,calendar_ready,status) VALUES(?,?,'旧版本提前创建的空卡片','preview-employee',?,?,'demo',0,'open')", id, '历史空卡片', time, time);
+    ctx.store.run("INSERT INTO requirement_assignees(requirement_id,user_id,assigned_by,created_at,responsibility) VALUES(?,'preview-employee','preview-employee',?,'development')", id, time);
+  }
+  ctx.store.run("INSERT INTO asset_requirements VALUES(?,?,'preview-employee',?)", draft.id, ids[0], time);
+  // A zero-byte metadata row from old code must not count as an uploaded Demo.
+  ctx.store.run("INSERT INTO files VALUES('legacy-empty-file','empty.zip',0,'','preview-employee',?)", time);
+  ctx.store.run("INSERT INTO version_files VALUES(?,'legacy-empty-file')", draft.versionId);
+  const stored = ctx.store.all('SELECT * FROM requirements WHERE id IN (?,?) ORDER BY id', ...ids);
+  const restarted = createApp({ dataDir: ctx.store.root, demoMode: true, origin });
+  try { assert.deepEqual(restarted.store.all('SELECT * FROM requirements WHERE id IN (?,?) ORDER BY id', ...ids), stored); }
+  finally { restarted.store.db.close(); }
+  for (const client of [employee, pm]) assert.equal((await client.get('/requirements?q=' + encodeURIComponent('历史空卡片')).expect(200)).body.total, 0);
+  assert.equal((await pm.send('post', '/requirements/exports', { q: '历史空卡片' }).expect(202)).body.total, 0);
+  assert.equal((await detail(employee, draft.id)).requirements[0].awaitingDemo, true);
+  const uploaded = (await employee.upload(draft.versionId, 0).expect(201)).body;
+  assert.deepEqual(uploaded.requirements.map(item => item.id), [ids[0]]);
+  assert.equal((await employee.get('/requirements?q=' + encodeURIComponent('历史空卡片')).expect(200)).body.total, 1);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements WHERE id IN (?,?)', ...ids).n, 2);
+});
+
+test('standalone cards defer calendar through owner and status changes and activate only after requirement content or documents are supplied', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm');
+  const demo = await standalone(employee), endpoint = `/requirements/${demo.autoCreatedRequirementId}`;
+  let card = (await pm.get(endpoint).expect(200)).body;
+  card = (await pm.send('put', endpoint, { ...card, businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee'], title: '调整标题与负责人', deadlineDate: '2028-02-29' }).expect(200)).body;
+  assert.equal(card.calendarReady, false); assert.equal(card.calendar, null);
+  card = (await pm.send('post', endpoint + '/actions', { revision: card.revision, action: 'set_status', status: 'delivered' }).expect(200)).body;
+  ctx.requirementCalendar.enqueueForUser('preview-employee');
+  assert.equal(card.calendarReady, false); assert.equal(card.calendar, null);
+  assert.equal(ctx.store.one('SELECT 1 FROM requirement_calendar WHERE requirement_id=?', card.id), undefined);
+  card = (await pm.send('put', endpoint, { ...card, content: '补充业务场景、具体数据范围与交付要求。', businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee'] }).expect(200)).body;
+  assert.equal(card.calendarReady, true); assert.equal(card.calendar.status, 'pending');
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirement_calendar WHERE requirement_id=?', card.id).n, 1);
+  const other = await standalone(employee);
+  const otherEndpoint = `/requirements/${other.autoCreatedRequirementId}`;
+  await requirementUpload(pm, other.autoCreatedRequirementId);
+  const withDocument = (await pm.get(otherEndpoint).expect(200)).body;
+  assert.equal(withDocument.calendarReady, true); assert.equal(withDocument.calendar.status, 'pending');
+});
+
+test('PM and business can maintain automatically created requirements without granting their employee publisher editing rights', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  const demo = await standalone(employee), endpoint = `/requirements/${demo.autoCreatedRequirementId}`;
+  for (const client of [pm, business]) assert.equal((await client.get(endpoint).expect(200)).body.canManage, true);
+  const edited = (await pm.send('put', endpoint, { ...requirementContent, businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee', 'preview-other'], revision: 0 }).expect(200)).body;
+  assert.equal(edited.publisher.id, 'preview-employee'); assert.equal(edited.source, 'demo');
+  assert.deepEqual(edited.businessOwners.map(user => user.id), ['preview-business']);
+  assert.deepEqual(new Set(edited.developmentOwners.map(user => user.id)), new Set(['preview-employee', 'preview-other']));
+  const assigned = await ctx.login('preview-other'); await assigned.get(endpoint).expect(200);
+  await assigned.send('put', endpoint, { ...requirementContent, revision: edited.revision }).expect(403);
+  await business.send('put', endpoint, { ...requirementContent, revision: 0 }).expect(409);
+  const revised = (await business.send('put', endpoint, { ...requirementContent, developmentUserIds: ['preview-employee'], businessUserIds: [], revision: edited.revision }).expect(200)).body;
+  await assigned.get(endpoint).expect(403);
+  const attachment = await requirementUpload(business, demo.autoCreatedRequirementId);
+  assert.equal(attachment.body.revision, revised.revision + 1);
+  await employee.get(`${endpoint}/documents/${attachment.body.id}/download`).expect(200);
+  await employee.send('delete', `${endpoint}/demos/${demo.id}`, { revision: 0 }).expect(403);
+  await business.send('put', `/versions/${demo.versionId}`, { revision: 0, description }).expect(403);
+});
+
+test('file retries, description edits and new versions reuse the automatic card, and explicit unbinding does not recreate it', async t => {
+  const ctx = await fixture(t), manager = await ctx.login('preview-manager');
+  const demo = (await manager.send('post', '/assets', { description, requirementIds: [] }).expect(201)).body;
+  const count = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  await manager.upload(demo.versionId, 0, 'empty.csv', Buffer.alloc(0)).expect(400);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, count);
+  await manager.send('put', `/versions/${demo.versionId}`, { revision: 0, assetRevision: 0, description, requirementIds: demo.requirements.map(item => item.id) }).expect(200);
+  const uploaded = (await manager.upload(demo.versionId, 1, 'sample.csv', Buffer.from('id,value\n1,2')).expect(201)).body;
+  assert.equal((await action(manager, demo.versionId, 2, 'publish')).status, 200);
+  let current = await detail(manager, demo.id);
+  const next = (await manager.send('post', `/assets/${demo.id}/versions`, { revision: current.revision, baseVersionId: demo.versionId }).expect(201)).body;
+  current = await detail(manager, demo.id);
+  assert.deepEqual(current.requirements.map(item => item.id), [uploaded.autoCreatedRequirementId]);
+  await manager.send('put', `/versions/${next.versionId}`, { revision: 0, assetRevision: current.revision, description, requirementIds: [] }).expect(200);
+  current = await detail(manager, demo.id); assert.deepEqual(current.requirements, []);
+  await manager.send('put', `/versions/${next.versionId}`, { revision: 1, description }).expect(200);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, count + 1);
+  assert.deepEqual((await detail(manager, demo.id)).requirements, []);
+});
+
+test('automatic card creation rolls back with the file if queuing fails and a retried upload can then succeed', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee');
+  const tables = ['assets', 'versions', 'requirements', 'asset_requirements', 'requirement_assignees', 'notifications', 'requirement_calendar', 'requirement_wiki', 'events', 'idempotency'];
+  const counts = () => tables.map(table => ctx.store.one(`SELECT COUNT(*) AS n FROM ${table}`).n), before = counts();
+  for (const [requirementIds, status] of [[['invalid'], 400], [['00000000-0000-4000-8000-000000000000'], 404], [null, 400]]) {
+    await employee.send('post', '/assets', { description, requirementIds }).expect(status); assert.deepEqual(counts(), before);
+  }
+  const body = { description, requestId: '105a73b1-78f5-4563-8954-78001adfa8b6' };
+  const demo = (await employee.send('post', '/assets', body).expect(201)).body;
+  const staged = counts();
+  ctx.store.db.exec("CREATE TRIGGER fail_auto_card_wiki BEFORE INSERT ON requirement_wiki BEGIN SELECT RAISE(ABORT,'simulated queuing failure'); END");
+  await employee.upload(demo.versionId, 0).expect(500); assert.deepEqual(counts(), staged);
+  assert.equal((await detail(employee, demo.id)).latest.files.length, 0);
+  assert.deepEqual(fs.readdirSync(path.join(ctx.store.root, 'tmp')), []);
+  ctx.store.db.exec('DROP TRIGGER fail_auto_card_wiki');
+  const uploaded = (await employee.upload(demo.versionId, 0).expect(201)).body;
+  assert.ok(uploaded.autoCreatedRequirementId);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, before[tables.indexOf('requirements')] + 1);
+});
+
 test('business publishers bind visible Demos without gaining permission to edit Demo content', async t => {
   const ctx = await fixture(t), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee');
-  const requirement = await publishRequirement(business), demo = (await employee.send('post', '/assets', { description }).expect(201)).body;
-  await business.send('post', `/requirements/${requirement.id}/demos`, { assetId: demo.id, revision: 0 }).expect(200);
+  const requirement = await publishRequirement(business), demo = await standalone(employee);
+  await business.send('post', `/requirements/${requirement.id}/demos`, { assetId: demo.id, revision: 1 }).expect(200);
   let current = await detail(employee, demo.id);
-  assert.deepEqual(current.requirements.map(item => item.id), [requirement.id]); assert.equal(current.revision, 1);
+  assert.deepEqual(new Set(current.requirements.map(item => item.id)), new Set([requirement.id, demo.autoCreatedRequirementId])); assert.equal(current.revision, 2);
   await business.send('put', `/versions/${demo.versionId}`, { revision: 0, description }).expect(403);
-  await business.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: 1 }).expect(200);
-  current = await detail(employee, demo.id); assert.equal(current.requirements.length, 0);
+  await business.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: 2 }).expect(200);
+  current = await detail(employee, demo.id); assert.deepEqual(current.requirements.map(item => item.id), [demo.autoCreatedRequirementId]);
   const anotherPublisher = await ctx.login('preview-pm'), foreignRequirement = await publishRequirement(anotherPublisher);
   await business.send('post', `/requirements/${foreignRequirement.id}/demos`, { assetId: demo.id, revision: current.revision }).expect(403);
 });
 
-test('drafts may be unbound but submission and publication require a requirement', async t => {
+test('requirement bindings are optional for submission, publication, restoration and the last binding may be removed', async t => {
   const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm');
   const requirement = await publishRequirement(pm);
   for (const [client, transition] of [[employee, 'submit'], [manager, 'publish']]) {
-    const demo = (await client.send('post', '/assets', { description }).expect(201)).body;
-    await client.upload(demo.versionId, 0, 'sample.csv', Buffer.from('id,value\n1,2')).expect(201);
-    const denied = await action(client, demo.versionId, 1, transition); assert.equal(denied.status, 400); assert.match(denied.body.error, /绑定至少一个需求/);
-    const before = await detail(client, demo.id);
-    await client.send('put', `/versions/${demo.versionId}`, { revision: 1, assetRevision: before.revision, description, requirementIds: [requirement.id] }).expect(200);
-    assert.equal((await action(client, demo.versionId, 2, transition)).status, 200);
-    const after = await detail(client, demo.id);
-    assert.deepEqual(after.requirements.map(item => item.id), [requirement.id]);
-    const blocked = await pm.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: after.revision }).expect(409);
-    assert.match(blocked.body.error, /保留至少一个/);
+    const demo = await standalone(client);
+    // Explicitly remove the new default card to exercise a genuinely unbound workflow.
+    await pm.send('delete', `/requirements/${demo.autoCreatedRequirementId}/demos/${demo.id}`, { revision: 1 }).expect(200);
+    assert.equal((await action(client, demo.versionId, 1, transition)).status, 200);
+    let after = await detail(client, demo.id);
+    assert.deepEqual(after.requirements, []);
+    await pm.send('post', `/requirements/${requirement.id}/demos`, { assetId: demo.id, revision: after.revision }).expect(200);
+    after = await detail(client, demo.id);
+    await pm.send('delete', `/requirements/${requirement.id}/demos/${demo.id}`, { revision: after.revision }).expect(200);
+    after = await detail(client, demo.id);
+    assert.deepEqual(after.requirements, []);
     if (transition === 'submit') {
-      assert.equal(after.submissions[0].snapshot.requirements[0].id, requirement.id);
-      await manager.send('put', `/versions/${demo.versionId}`, { revision: 3, assetRevision: after.revision, description, requirementIds: [] }).expect(409);
+      assert.deepEqual(after.submissions[0].snapshot.requirements, []);
+      await manager.send('put', `/versions/${demo.versionId}`, { revision: 2, assetRevision: after.revision, description, requirementIds: [] }).expect(200);
+      assert.equal((await action(manager, demo.versionId, 3, 'publish')).status, 200);
+    } else {
+      assert.equal((await action(manager, demo.versionId, 2, 'unpublish', '临时下架')).status, 200);
+      assert.equal((await action(manager, demo.versionId, 3, 'restore', '恢复使用')).status, 200);
     }
   }
+});
+
+test('cost and data volume are optional on save but required for submit, publish and restore with atomic validation', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager');
+  for (const value of [undefined, '', '  \n  ']) {
+    const created = (await employee.send('post', '/assets', { description: { ...description, costEstimate: value, dataVolume: value } }).expect(201)).body;
+    let saved = (await detail(employee, created.id)).latest;
+    assert.equal(saved.description.costEstimate, ''); assert.equal(saved.description.dataVolume, '');
+    await employee.send('put', `/versions/${created.versionId}`, { revision: 0, description: { ...description, costEstimate: value, dataVolume: value } }).expect(200);
+    saved = (await detail(employee, created.id)).latest; assert.equal(saved.revision, 1);
+    assert.equal(saved.description.costEstimate, ''); assert.equal(saved.description.dataVolume, '');
+  }
+  for (const [client, transition] of [[employee, 'submit'], [manager, 'publish']]) {
+    const demo = (await client.send('post', '/assets', { description: { ...description, costEstimate: '', dataVolume: '' } }).expect(201)).body;
+    await client.upload(demo.versionId, 0).expect(201);
+    const submissionsBefore = ctx.store.one('SELECT COUNT(*) AS count FROM submissions').count;
+    let denied = await action(client, demo.versionId, 1, transition); assert.equal(denied.status, 400); assert.match(denied.body.error, /成本预估/);
+    assert.equal((await detail(client, demo.id)).latest.status, 'draft');
+    await client.send('put', `/versions/${demo.versionId}`, { revision: 1, description: { ...description, dataVolume: '   ' } }).expect(200);
+    denied = await action(client, demo.versionId, 2, transition); assert.equal(denied.status, 400); assert.match(denied.body.error, /数据量级.*以两周产量评估/);
+    assert.equal((await detail(client, demo.id)).latest.status, 'draft');
+    assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM submissions').count, submissionsBefore);
+    await client.send('put', `/versions/${demo.versionId}`, { revision: 2, description }).expect(200);
+    assert.equal((await action(client, demo.versionId, 3, transition)).status, 200);
+    if (transition === 'publish') {
+      assert.equal((await action(client, demo.versionId, 4, 'unpublish', '校验历史版本')).status, 200);
+      ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ ...description, dataVolume: undefined }), demo.versionId);
+      denied = await action(client, demo.versionId, 5, 'restore', '恢复');
+      assert.equal(denied.status, 400); assert.match(denied.body.error, /数据量级/);
+      ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify(description), demo.versionId);
+      assert.equal((await action(client, demo.versionId, 5, 'restore', '已补齐数据量级')).status, 200);
+    } else {
+      const latest = await detail(manager, demo.id);
+      const round = latest.submissions[0];
+      assert.equal(round.snapshot.description.dataVolume, description.dataVolume);
+      assert.equal((await action(manager, demo.versionId, 4, 'publish')).status, 200);
+    }
+    const current = await detail(client, demo.id);
+    const newVersion = transition === 'publish' ? { versionId: current.latest.id }
+      : (await client.send('post', `/assets/${demo.id}/versions`, { revision: current.revision, baseVersionId: demo.versionId }).expect(201)).body;
+    if (transition === 'publish') assert.equal(current.latest.status, 'draft');
+    const copied = (await detail(client, demo.id)).versions.find(version => version.id === newVersion.versionId);
+    if (transition === 'submit') assert.equal(copied.description.dataVolume, description.dataVolume);
+  }
+  const tooLong = await employee.send('post', '/assets', { description: { ...description, dataVolume: '量'.repeat(5001) } }).expect(400);
+  assert.ok(tooLong.body.error);
 });
 
 test('closed requirements preserve existing links and reject new links until reopened', async t => {
@@ -924,7 +1282,7 @@ test('closed requirements preserve existing links and reject new links until reo
   await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(409);
   const next = (await employee.send('post', '/assets', { description }).expect(201)).body;
   await pm.send('post', `/requirements/${requirement.id}/demos`, { assetId: next.id, revision: 0 }).expect(409);
-  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 1, action: 'reopen' }).expect(200);
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: 1, action: 'reopen', publishDate: '2028-01-01', deadlineDate: '2028-01-15' }).expect(200);
   await pm.send('post', `/requirements/${requirement.id}/demos`, { assetId: next.id, revision: 0 }).expect(200);
 });
 
@@ -953,6 +1311,7 @@ test('requirement bindings persist through backup, restore and Demo version crea
   const published = await detail(manager, demo.id);
   await manager.send('post', `/assets/${demo.id}/versions`, { revision: published.revision, baseVersionId: demo.versionId }).expect(201);
   assert.equal((await detail(manager, demo.id)).versions.every(version => version.requirements[0].id === requirement.id), true);
+  const independent = await standalone(manager);
   const backupPath = path.join(ctx.root, 'requirement-backup'), restorePath = path.join(ctx.root, 'requirement-restore');
   await createBackup(ctx.store.root, backupPath); await restoreBackup(backupPath, restorePath);
   const restored = createApp({ dataDir: restorePath, demoMode: true, origin });
@@ -964,6 +1323,9 @@ test('requirement bindings persist through backup, restore and Demo version crea
     assert.equal(dates.planned_date, '2028-02-28'); assert.equal(dates.deadline_date, '2028-02-29');
     assert.equal(restored.store.one('SELECT file_id FROM requirement_files WHERE requirement_id=?', requirement.id).file_id, document.body.id);
     assert.equal(fs.readFileSync(path.join(restorePath, 'files', document.body.id), 'utf8'), 'requirement document');
+    assert.equal(restored.store.one('SELECT source FROM requirements WHERE id=?', requirement.id).source, 'manual');
+    assert.equal(restored.store.one('SELECT source FROM requirements WHERE id=?', independent.autoCreatedRequirementId).source, 'demo');
+    assert.equal(restored.store.one('SELECT requirement_id FROM asset_requirements WHERE asset_id=?', independent.id).requirement_id, independent.autoCreatedRequirementId);
     assert.equal(restored.store.one('PRAGMA foreign_key_check'), undefined);
   } finally { restored.store.db.close(); }
 });
@@ -1116,7 +1478,7 @@ test('requirements put closed items last before pagination and preserve search, 
   assert.equal(mine.total, 5);
   assert.deepEqual(mine.items.map(item => item.id), [3, 2, 1, 0, 4].map(index => items[index].id));
   assert.deepEqual((await pm.get(query + '&status=closed').expect(200)).body.items.map(item => item.id), [items[0].id, items[4].id]);
-  await pm.send('post', `/requirements/${items[0].id}/actions`, { revision: 0, action: 'set_status', status: 'open' }).expect(200);
+  await pm.send('post', `/requirements/${items[0].id}/actions`, { revision: 0, action: 'set_status', status: 'open', publishDate: '2028-01-01', deadlineDate: '2028-01-15' }).expect(200);
   assert.equal((await employee.get(query).expect(200)).body.items[0].id, items[0].id);
 });
 
@@ -1160,7 +1522,8 @@ test('only PMs export the eight-column template with one requirement per row, se
   await other.send('post', '/assets', { description: { ...description, title: '其他人的 Demo', content: 'https://team.feishu.cn/docx/HiddenDemo' }, requirementIds: [first.id] }).expect(201);
   await other.send('post', '/assets', { description: { ...description, title: '无权查看的需求 Demo' }, requirementIds: [second.id] }).expect(201);
   async function exported(client, query) {
-    const result = await client.get('/requirements/export.xlsx?' + query).buffer(true).parse((res, callback) => {
+    const job = (await client.send('post', '/requirements/exports', Object.fromEntries(new URLSearchParams(query))).expect(202)).body;
+    const result = await client.get(`/requirements/exports/${job.id}/file.xlsx`).buffer(true).parse((res, callback) => {
       const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => callback(null, Buffer.concat(chunks))); res.on('error', callback);
     }).expect(200);
     assert.match(result.headers['content-type'], /application\/vnd.openxmlformats-officedocument.spreadsheetml.sheet/);
@@ -1197,7 +1560,8 @@ test('only PMs export the eight-column template with one requirement per row, se
   assert.equal(closed.rowCount, 2); assert.equal(closed.getCell('H2').text, '无权查看的需求 Demo');
   assert.ok(new URL(closed.getCell('H2').hyperlink).searchParams.get('demo'));
   assert.equal((await exported(pm, 'q=' + encodeURIComponent('商务同事'))).getCell('G2').value.toISOString().slice(0, 10), '2028-01-02');
-  await pm.get('/requirements/export.xlsx?status=invalid').expect(400);
+  await pm.send('post', '/requirements/exports', { status: 'invalid' }).expect(400);
+  await pm.get('/requirements/export.xlsx').expect(410);
   await request(ctx.app).get('/api/requirements/export.xlsx').expect(401);
   assert.equal((await pm.get(`/requirements/${noDemo.id}`).expect(200)).body.demos.length, 0);
   assert.equal((await employee.get(`/assets/${firstDemo.id}`).expect(200)).body.latest.description.title, '=导出 Demo A');
@@ -1224,27 +1588,25 @@ test('prepared exports freeze the selected filter scope, restrict job access and
   for (const client of [employee, business, admin]) {
     await client.get(`/requirements/exports/${job.id}`).expect(403);
     await client.get(`/requirements/exports/${job.id}/file.xlsx`).expect(403);
+    await client.get(`/requirements/exports/${job.id}/file.xlsx?sync=skip`).expect(403);
     await client.send('post', `/requirements/exports/${job.id}/retry`, {}).expect(403);
   }
   await manager.get(`/requirements/exports/${job.id}`).expect(404);
   await manager.get(`/requirements/exports/${job.id}/file.xlsx`).expect(404);
+  await manager.get(`/requirements/exports/${job.id}/file.xlsx?sync=skip`).expect(404);
   await manager.send('post', `/requirements/exports/${job.id}/retry`, {}).expect(404);
   const own = (await pm.send('post', '/requirements/exports', { ...filters, assigned: '1' }).expect(202)).body;
   assert.equal(own.total, 1);
   ctx.store.run('UPDATE requirement_exports SET preview=0 WHERE id=?', job.id);
-  ctx.store.run("UPDATE requirement_export_items SET completed=0,url='' WHERE export_id=?", job.id);
-  ctx.store.run("UPDATE requirement_wiki SET status='pending' WHERE requirement_id=?", first.id);
-  ctx.store.run("UPDATE requirement_wiki SET status='failed',attempts=5,error='飞书文档权限不足' WHERE requirement_id=?", second.id);
+  ctx.store.run("UPDATE requirement_export_items SET completed=0,url='',state='failed',error='个人文档导出失败' WHERE export_id=?", job.id);
   let progress = (await pm.get(`/requirements/exports/${job.id}`).expect(200)).body;
-  assert.equal(progress.status, 'pending'); assert.equal(progress.failed, 1); assert.equal(progress.pending, 1);
+  assert.equal(progress.status, 'failed'); assert.equal(progress.failed, 2);
   await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(409);
-  ctx.store.run("UPDATE requirement_wiki SET status='failed',attempts=5 WHERE requirement_id=?", first.id);
-  progress = (await pm.get(`/requirements/exports/${job.id}`).expect(200)).body;
-  assert.equal(progress.status, 'failed');
-  await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(409);
+  await pm.get(`/requirements/exports/${job.id}/file.xlsx?sync=skip`).expect(409);
   progress = (await pm.send('post', `/requirements/exports/${job.id}/retry`, {}).expect(200)).body;
-  assert.equal(progress.status, 'pending'); assert.equal(progress.failed, 0);
-  for (const [index, id] of [first.id, second.id].entries()) ctx.store.run("UPDATE requirement_wiki SET status='synced',url=? WHERE requirement_id=?", 'https://team.feishu.cn/wiki/Export' + index, id);
+  assert.equal(progress.status, 'authorization_required');
+  await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(409);
+  ctx.store.run("UPDATE requirement_export_items SET completed=1,state='ready',url='https://team.feishu.cn/docx/Export' WHERE export_id=?", job.id);
   assert.equal((await pm.get(`/requirements/exports/${job.id}`).expect(200)).body.status, 'ready');
   const file = await pm.get(`/requirements/exports/${job.id}/file.xlsx`).buffer(true).parse((res, callback) => {
     const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => callback(null, Buffer.concat(chunks))); res.on('error', callback);
@@ -1258,6 +1620,7 @@ test('prepared exports freeze the selected filter scope, restrict job access and
   assert.equal(sheet.getCell('H3').text, '/');
   ctx.store.run("UPDATE users SET roles='[\"employee\"]' WHERE id='preview-pm'");
   await pm.get(`/requirements/exports/${job.id}/file.xlsx`).expect(403);
+  await pm.get(`/requirements/exports/${job.id}/file.xlsx?sync=skip`).expect(403);
 });
 
 test('Demo uploads, saved descriptions, workflow and bindings queue all linked wiki updates without blocking uploads or backfilling history', async t => {
@@ -1294,7 +1657,7 @@ test('Demo uploads, saved descriptions, workflow and bindings queue all linked w
   await queuedAction(manager, 'publish');
   await queuedAction(manager, 'unpublish', '下架测试');
   await queuedAction(manager, 'restore', '恢复测试');
-  const next = (await queued(() => employee.send('post', `/assets/${demo.id}/versions`, { revision: assetRevision(), baseVersionId: demo.versionId }).expect(201))).body;
+  const next = { versionId: ctx.store.one("SELECT id FROM versions WHERE asset_id=? AND status='draft'", demo.id).id };
   await queued(() => employee.send('delete', `/versions/${next.versionId}`, { revision: 0 }).expect(200));
   await queued(() => pm.send('delete', `/requirements/${first.id}/demos/${demo.id}`, { revision: assetRevision() }).expect(200));
   await queued(() => pm.send('post', `/requirements/${first.id}/demos`, { assetId: demo.id, revision: assetRevision() }).expect(200));
@@ -1304,7 +1667,7 @@ test('Demo uploads, saved descriptions, workflow and bindings queue all linked w
   const history = ctx.store.one('SELECT r.id FROM requirements r LEFT JOIN requirement_wiki w ON w.requirement_id=r.id WHERE w.requirement_id IS NULL').id;
   const historicalDemo = (await queued(() => employee.send('post', '/assets', { description, requirementIds: [history] }).expect(201), [])).body;
   await queued(() => employee.upload(historicalDemo.versionId, 0).expect(201), []);
-  assert.equal(ctx.requirementWiki.info(history).status, 'not_created'); assert.equal(ctx.requirementWiki.info(unrelated.id).status, 'synced');
+  assert.equal(ctx.requirementWiki.info(history).status, 'not_created'); assert.equal(ctx.requirementWiki.info(unrelated.id).status, 'not_created');
 });
 
 test('requirement wiki jobs follow publication, attachment uploads, forwarding and account changes with restricted sync endpoints', async t => {
@@ -1312,10 +1675,10 @@ test('requirement wiki jobs follow publication, attachment uploads, forwarding a
   const history = ctx.store.one('SELECT id FROM requirements').id;
   assert.equal(ctx.requirementWiki.info(history).status, 'not_created');
   let requirement = await publishRequirement(pm, { title: '飞书协作文档需求', content: '平台原有完整输入内容应保留。', assignedUserIds: ['preview-employee'] });
-  assert.equal(requirement.content, '平台原有完整输入内容应保留。'); assert.equal(requirement.wiki.status, 'pending');
+  assert.equal(requirement.content, '平台原有完整输入内容应保留。'); assert.equal(requirement.wiki.status, 'not_created');
   const job = () => ctx.store.one('SELECT * FROM requirement_wiki WHERE requirement_id=?', requirement.id);
   assert.equal(job().generation, 1);
-  assert.equal((await employee.get(`/requirements/${requirement.id}/wiki`).expect(200)).body.status, 'pending');
+  assert.equal((await employee.get(`/requirements/${requirement.id}/wiki`).expect(200)).body.status, 'not_created');
   await other.get(`/requirements/${requirement.id}/wiki`).expect(403);
   await employee.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(403);
   await pm.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(409);
@@ -1331,14 +1694,14 @@ test('requirement wiki jobs follow publication, attachment uploads, forwarding a
   assert.equal(job().generation, 5);
   for (const client of [pm, business, admin]) {
     ctx.store.run("UPDATE requirement_wiki SET status='failed',error='权限不足' WHERE requirement_id=?", requirement.id);
-    await client.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(200);
-    assert.equal(job().status, 'pending');
+    const response = await client.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(409);
+    assert.match(response.body.error, /先导出/);
   }
   await pm.send('post', `/requirements/${requirement.id}/wiki/retry`, {}).expect(409);
   await business.get('/admin/requirement-wiki').expect(403);
   assert.equal((await admin.get('/admin/requirement-wiki').expect(200)).body.length, 1);
-  await pm.send('post', `/requirements/${history}/wiki/retry`, {}).expect(200);
-  assert.equal(ctx.requirementWiki.info(history).status, 'pending');
+  await pm.send('post', `/requirements/${history}/wiki/retry`, {}).expect(409);
+  assert.equal(ctx.requirementWiki.info(history).status, 'not_created');
   const jobCount = ctx.store.one('SELECT COUNT(*) AS count FROM requirement_wiki').count;
   await ctx.requirementWiki.drain(); assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_wiki').count, jobCount);
   await pm.send('post', '/requirements/missing/wiki/retry', {}).expect(404);
@@ -1353,7 +1716,7 @@ test('publishing a requirement atomically queues deduplicated notifications and 
   assert.ok(jobs.every(job => job.kind === 'requirement_publish' && job.version_id === null && job.status === 'pending'));
   assert.equal(requirement.plannedDate, '2027-12-31'); assert.equal(requirement.calendar.status, 'pending');
   assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_calendar WHERE requirement_id=?', requirement.id).count, 1);
-  assert.equal(requirement.wiki.status, 'pending');
+  assert.equal(requirement.wiki.status, 'not_created');
   const counts = () => ['requirements', 'notifications', 'requirement_calendar', 'requirement_wiki'].map(table => ctx.store.one(`SELECT COUNT(*) AS count FROM ${table}`).count);
   const before = counts();
   for (const plannedDate of ['2027-02-29', '2027-13-01', 'tomorrow']) await pm.send('post', '/requirements', { ...requirementContent, plannedDate }).expect(400);
@@ -1599,4 +1962,246 @@ test('calendar retry checks live roles and account state and requires CSRF prote
   const job = ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
   assert.equal(job.status, 'failed'); assert.equal(job.attempts, 5);
   assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM events WHERE action='requirement_calendar_retry'").count, 0);
+});
+
+test('unpublishing atomically creates one editable draft with copied files and bindings while preserving the offline version and publication snapshot', async t => {
+  const ctx = await fixture(t), owner = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager'), other = await ctx.login('preview-other');
+  const demo = await create(owner); await owner.upload(demo.versionId, 0).expect(201);
+  assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
+  const published = await detail(owner, demo.id), original = published.versions.find(version => version.id === demo.versionId), bindings = published.requirements;
+  const response = await action(manager, demo.versionId, 2, 'unpublish', '补充新数据'); assert.equal(response.status, 200);
+  const { workingVersionId, createdDraft } = response.body;
+  assert.ok(workingVersionId); assert.notEqual(workingVersionId, demo.versionId); assert.equal(createdDraft, true);
+  let current = await detail(owner, demo.id);
+  assert.equal(current.currentVersionId, null); assert.equal(current.latest.id, workingVersionId); assert.equal(current.latest.status, 'draft');
+  assert.deepEqual(current.latest.files.map(file => file.id), original.files.map(file => file.id)); assert.deepEqual(current.requirements, bindings);
+  assert.equal(current.versions.find(version => version.id === demo.versionId).status, 'offline');
+  const drafts = (await owner.get('/catalog?scope=mine&status=draft').expect(200)).body.items;
+  assert.ok(drafts.some(asset => asset.id === demo.id && asset.latest.id === workingVersionId));
+  assert.ok(!(await owner.get('/catalog?scope=mine&status=published').expect(200)).body.items.some(asset => asset.id === demo.id));
+  await owner.get(`/versions/${demo.versionId}/files/${original.files[0].id}/download`).expect(403);
+  await owner.get(`/versions/${workingVersionId}/files/${original.files[0].id}/download`).expect(200);
+  await other.send('put', `/versions/${workingVersionId}`, { revision: 0, description }).expect(404);
+  await owner.send('put', `/versions/${demo.versionId}`, { revision: 3, description }).expect(409);
+  await owner.send('put', `/versions/${workingVersionId}`, { revision: 0, description: { ...description, summary: '下架后重新编辑', changes: '补充数据说明' } }).expect(200);
+  assert.equal((await action(manager, demo.versionId, 2, 'unpublish', '重复下架')).status, 409);
+  const reopened = await action(owner, demo.versionId, 3, 'reopen_draft'); assert.equal(reopened.status, 200);
+  assert.equal(reopened.body.workingVersionId, workingVersionId); assert.equal(reopened.body.createdDraft, false);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM versions WHERE asset_id=?', demo.id).count, 2);
+  assert.equal((await action(owner, workingVersionId, 1, 'submit')).status, 200);
+  assert.equal((await action(manager, workingVersionId, 2, 'publish')).status, 200);
+  current = await detail(owner, demo.id);
+  assert.equal(current.currentVersionId, workingVersionId); assert.equal(current.versions.find(version => version.id === demo.versionId).description.summary, original.description.summary);
+  const snapshot = current.events.find(item => item.action === 'publish' && item.version_id === demo.versionId).detail.snapshot;
+  assert.equal(snapshot.description.summary, original.description.summary);
+});
+
+test('unpublishing with an existing draft or pending review preserves it and never creates a second working version', async t => {
+  for (const pending of [false, true]) {
+    const ctx = await fixture(t), owner = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager');
+    const demo = await create(owner); await owner.upload(demo.versionId, 0).expect(201); assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
+    const next = (await owner.send('post', `/assets/${demo.id}/versions`, { revision: (await detail(owner, demo.id)).revision, baseVersionId: demo.versionId }).expect(201)).body;
+    await owner.send('put', `/versions/${next.versionId}`, { revision: 0, description: { ...description, summary: '已有未完成修改', changes: '新数据版本' } }).expect(200);
+    if (pending) assert.equal((await action(owner, next.versionId, 1, 'submit')).status, 200);
+    const before = ctx.store.one('SELECT * FROM versions WHERE id=?', next.versionId);
+    const response = await action(manager, demo.versionId, 2, 'unpublish', '停止旧版本'); assert.equal(response.status, 200);
+    assert.equal(response.body.createdDraft, false); assert.equal(response.body.workingVersionId, next.versionId);
+    assert.deepEqual(ctx.store.one('SELECT * FROM versions WHERE id=?', next.versionId), before);
+    assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM versions WHERE asset_id=?', demo.id).count, 2);
+  }
+});
+
+test('historical offline versions can reopen into a draft only with edit permission and failed unpublish rolls back the draft', async t => {
+  const ctx = await fixture(t), owner = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm');
+  const demo = await create(owner); await owner.upload(demo.versionId, 0).expect(201); assert.equal((await action(manager, demo.versionId, 1, 'publish')).status, 200);
+  const enqueue = ctx.notifications.enqueue;
+  ctx.notifications.enqueue = () => { throw new Error('simulated notification failure'); };
+  assert.equal((await action(manager, demo.versionId, 2, 'unpublish', '事务回滚')).status, 500);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM versions WHERE asset_id=?', demo.id).count, 1);
+  assert.equal((await detail(owner, demo.id)).currentVersionId, demo.versionId);
+  ctx.notifications.enqueue = enqueue;
+  ctx.store.run("UPDATE versions SET status='offline' WHERE id=?", demo.versionId); ctx.store.run('UPDATE assets SET current_version_id=NULL WHERE id=?', demo.id);
+  await pm.send('put', `/assets/${demo.id}/permissions/preview-colleague`, { level: 'readonly' }).expect(200);
+  const reader = await ctx.login('preview-colleague');
+  assert.equal((await action(reader, demo.versionId, 2, 'reopen_draft')).status, 403);
+  const response = await action(owner, demo.versionId, 2, 'reopen_draft'); assert.equal(response.status, 200); assert.equal(response.body.createdDraft, true);
+  assert.equal((await detail(owner, demo.id)).latest.id, response.body.workingVersionId);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('only PM and business roles can delete requirement documents, including nonpublishers, while other role-only accounts cannot', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-employee', 'preview-other-manager', 'preview-admin'] });
+  const uploaded = (await requirementUpload(pm, requirement.id)).body, endpoint = `/requirements/${requirement.id}`;
+  for (const id of ['preview-employee', 'preview-other-manager', 'preview-admin', 'preview-other']) {
+    const client = await ctx.login(id);
+    if (id !== 'preview-other') assert.equal((await client.get(endpoint).expect(200)).body.canDeleteDocuments, false);
+    await client.send('delete', `${endpoint}/documents/${uploaded.id}`, { revision: uploaded.revision }).expect(403);
+  }
+  for (const client of [pm, business]) assert.equal((await client.get(endpoint).expect(200)).body.canDeleteDocuments, true);
+  const before = (await business.get(endpoint).expect(200)).body;
+  assert.equal(before.canManage, false, 'a nonpublishing business can delete without gaining permission to edit the requirement');
+  const removed = (await business.send('delete', `${endpoint}/documents/${uploaded.id}`, { revision: before.revision }).expect(200)).body;
+  assert.equal(removed.documents.length, 0); assert.equal(removed.revision, before.revision + 1); assert.equal(removed.content, before.content);
+  assert.equal(removed.status, before.status); assert.deepEqual(removed.assignedUsers, before.assignedUsers); assert.equal(removed.canManage, false);
+  await pm.get(`${endpoint}/documents/${uploaded.id}/download`).expect(404);
+  await business.send('delete', `${endpoint}/documents/${uploaded.id}`, { revision: removed.revision }).expect(404);
+  const businessRequirement = await publishRequirement(business);
+  const second = (await requirementUpload(business, businessRequirement.id)).body;
+  await pm.send('delete', `/requirements/${businessRequirement.id}/documents/${second.id}`, { revision: second.revision }).expect(200);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM events WHERE action='requirement_document_delete'").count, 2);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('requirement document deletion checks live roles, CSRF, requirement revision and exact file binding before changing data', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  const requirement = await publishRequirement(pm), unrelated = await publishRequirement(pm);
+  const first = (await requirementUpload(pm, requirement.id, Buffer.from('first'), 'first.txt')).body;
+  const second = (await requirementUpload(pm, requirement.id, Buffer.from('second'), 'second.txt')).body;
+  const foreign = (await requirementUpload(pm, unrelated.id, Buffer.from('foreign'), 'foreign.txt')).body;
+  const endpoint = `/requirements/${requirement.id}/documents/${first.id}`;
+  const before = ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id);
+  await pm.agent.delete('/api' + endpoint).send({ revision: second.revision }).expect(403);
+  await pm.send('delete', endpoint, {}).expect(400);
+  await pm.send('delete', endpoint, { revision: first.revision }).expect(409);
+  await pm.send('delete', `/requirements/${requirement.id}/documents/${foreign.id}`, { revision: second.revision }).expect(404);
+  ctx.store.run("UPDATE users SET roles='[\"employee\"]' WHERE id='preview-business'");
+  await business.send('delete', endpoint, { revision: second.revision }).expect(403);
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id), before);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM requirement_files WHERE requirement_id=?', requirement.id).count, 2);
+  await pm.send('delete', endpoint, { revision: second.revision }).expect(200);
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: second.revision }).expect(409);
+  const current = (await pm.get(`/requirements/${requirement.id}`).expect(200)).body;
+  assert.deepEqual(current.documents.map(file => file.id), [second.id]);
+  ctx.store.run("UPDATE users SET enabled=0 WHERE id='preview-business'");
+  await business.send('delete', `/requirements/${requirement.id}/documents/${second.id}`, { revision: current.revision }).expect(403);
+});
+
+test('deleting a requirement attachment preserves immutable file bytes, other requirements and Demo references, and queues document sync atomically', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const requirement = await publishRequirement(pm), other = await publishRequirement(pm);
+  const file = (await requirementUpload(pm, requirement.id, Buffer.from('shared requirement document'), 'shared.txt')).body;
+  const demo = await create(employee);
+  ctx.store.run('INSERT INTO requirement_files VALUES(?,?,?,?)', other.id, file.id, 'preview-pm', new Date().toISOString());
+  ctx.store.run('INSERT INTO version_files VALUES(?,?)', demo.versionId, file.id);
+  const calendar = ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id);
+  const queued = ctx.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', requirement.id).generation;
+  const snapshot = ctx.store.one('SELECT * FROM files WHERE id=?', file.id);
+  const removed = (await pm.send('delete', `/requirements/${requirement.id}/documents/${file.id}`, { revision: file.revision }).expect(200)).body;
+  assert.equal(removed.documents.length, 0);
+  assert.deepEqual(ctx.store.one('SELECT * FROM files WHERE id=?', file.id), snapshot);
+  assert.equal(fs.readFileSync(path.join(ctx.store.root, 'files', file.id), 'utf8'), 'shared requirement document');
+  await employee.get(`/requirements/${other.id}/documents/${file.id}/download`).expect(200);
+  await employee.get(`/versions/${demo.versionId}/files/${file.id}/download`).expect(200);
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirement_calendar WHERE requirement_id=?', requirement.id), calendar);
+  assert.ok(ctx.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', requirement.id).generation > queued);
+  const second = (await requirementUpload(pm, requirement.id, Buffer.from('rollback'), 'rollback.txt')).body;
+  const before = ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id), sync = ctx.store.one('SELECT * FROM requirement_wiki WHERE requirement_id=?', requirement.id);
+  const enqueue = ctx.requirementWiki.enqueueExisting;
+  ctx.requirementWiki.enqueueExisting = () => { throw new Error('simulated document deletion sync failure'); };
+  try { await pm.send('delete', `/requirements/${requirement.id}/documents/${second.id}`, { revision: second.revision }).expect(500); }
+  finally { ctx.requirementWiki.enqueueExisting = enqueue; }
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id), before);
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirement_wiki WHERE requirement_id=?', requirement.id), sync);
+  await employee.get(`/requirements/${requirement.id}/documents/${second.id}/download`).expect(200);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM events WHERE action='requirement_document_delete' AND detail LIKE ?", '%' + second.id + '%').count, 0);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('only PM and business roles may delete requirement cards, including another publisher’s, automatic and closed cards', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
+  ctx.store.run("UPDATE users SET roles='[\"ops\"]' WHERE id='preview-unassigned'");
+  const requirement = await publishRequirement(pm, { assignedUserIds: ['preview-employee', 'preview-other-manager', 'preview-admin', 'preview-unassigned'] });
+  const endpoint = `/requirements/${requirement.id}`;
+  for (const id of ['preview-employee', 'preview-other-manager', 'preview-admin', 'preview-unassigned']) {
+    const client = await ctx.login(id);
+    assert.equal((await client.get(endpoint).expect(200)).body.canDelete, false);
+    assert.equal((await client.get('/requirements').expect(200)).body.items.find(item => item.id === requirement.id).canDelete, false);
+    await client.send('delete', endpoint, { revision: requirement.revision }).expect(403);
+  }
+  for (const client of [pm, business]) {
+    assert.equal((await client.get(endpoint).expect(200)).body.canDelete, true);
+    assert.equal((await client.get('/requirements').expect(200)).body.items.find(item => item.id === requirement.id).canDelete, true);
+  }
+  assert.equal((await business.get(endpoint).expect(200)).body.canManage, false);
+  await business.send('delete', endpoint, { revision: requirement.revision }).expect(200);
+  await business.send('delete', endpoint, { revision: requirement.revision }).expect(404);
+  const authoredByBusiness = await publishRequirement(business);
+  const closed = (await business.send('post', `/requirements/${authoredByBusiness.id}/actions`, { revision: 0, action: 'close' }).expect(200)).body;
+  await pm.send('delete', `/requirements/${closed.id}`, { revision: closed.revision }).expect(200);
+  const employee = await ctx.login('preview-employee'), demo = await standalone(employee);
+  await employee.send('delete', `/requirements/${demo.autoCreatedRequirementId}`, { revision: 0 }).expect(403);
+  await business.send('delete', `/requirements/${demo.autoCreatedRequirementId}`, { revision: 0 }).expect(200);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS n FROM events WHERE action='requirement_delete'").n, 3);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('requirement deletion hides all entry points and exports, cancels messages and preserves Demo bytes and unrelated bindings', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const requirement = await publishRequirement(pm, { title: '待删除的唯一验收需求' }), other = await publishRequirement(pm, { title: '继续保留的需求' });
+  const file = (await requirementUpload(pm, requirement.id)).body;
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [requirement.id, other.id] }).expect(201)).body;
+  await employee.upload(demo.versionId, 0, 'data.csv', Buffer.from('id,value\n1,2')).expect(201);
+  const before = await detail(employee, demo.id), versionBefore = ctx.store.one('SELECT * FROM versions WHERE id=?', demo.versionId);
+  await pm.send('delete', `/requirements/${requirement.id}`, { revision: file.revision }).expect(200);
+  for (const client of [pm, employee]) {
+    await client.get(`/requirements/${requirement.id}`).expect(404);
+    await client.get(`/requirements/${requirement.id}/documents/${file.id}/download`).expect(404);
+    await client.get(`/requirements/${requirement.id}/replies`).expect(404);
+    assert.ok(!(await client.get('/requirements').expect(200)).body.items.some(item => item.id === requirement.id));
+    assert.ok(!(await client.get('/requirements?assigned=1').expect(200)).body.items.some(item => item.id === requirement.id));
+    assert.equal((await client.get('/requirements?q=待删除的唯一验收需求').expect(200)).body.total, 0);
+  }
+  await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: file.revision + 1 }).expect(404);
+  await pm.send('post', `/requirements/${requirement.id}/actions`, { revision: file.revision + 1, action: 'close' }).expect(404);
+  await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(404);
+  const batch = (await pm.send('post', '/requirements/exports', { q: '待删除的唯一验收需求' }).expect(202)).body;
+  assert.equal(batch.total, 0);
+  const after = await detail(employee, demo.id);
+  assert.deepEqual(after.requirements.map(item => item.id), [other.id]);
+  assert.equal(after.revision, before.revision + 1);
+  assert.deepEqual(ctx.store.one('SELECT * FROM versions WHERE id=?', demo.versionId), versionBefore);
+  const dataFile = ctx.store.one('SELECT f.* FROM files f JOIN version_files vf ON vf.file_id=f.id WHERE vf.version_id=?', demo.versionId);
+  assert.equal(fs.readFileSync(path.join(ctx.store.root, 'files', dataFile.id), 'utf8'), 'id,value\n1,2');
+  assert.ok(fs.existsSync(path.join(ctx.store.root, 'files', file.id)));
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS n FROM notifications WHERE requirement_id=? AND status IN ('pending','failed')", requirement.id).n, 0);
+  assert.equal(ctx.requirementCalendar.info(requirement.id), null);
+  assert.equal(ctx.store.one('SELECT delete_pending FROM requirement_calendar WHERE requirement_id=?', requirement.id).delete_pending, 1);
+  assert.ok(ctx.store.one('SELECT deleted_at FROM requirements WHERE id=?', requirement.id).deleted_at);
+  assert.deepEqual(ctx.store.all('PRAGMA foreign_key_check'), []);
+});
+
+test('deleting the sole automatic requirement preserves its Demo and subsequent uploads do not recreate a requirement', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), employee = await ctx.login('preview-employee');
+  const demo = await standalone(employee), count = ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n;
+  await pm.send('delete', `/requirements/${demo.autoCreatedRequirementId}`, { revision: 0 }).expect(200);
+  assert.deepEqual((await detail(employee, demo.id)).requirements, []);
+  assert.equal(ctx.store.one('SELECT requirement_pending FROM assets WHERE id=?', demo.id).requirement_pending, 0);
+  await employee.upload(demo.versionId, 1, 'extra.csv', Buffer.from('id,value\n2,3')).expect(201);
+  assert.deepEqual((await detail(employee, demo.id)).requirements, []);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM requirements').n, count);
+});
+
+test('requirement deletion enforces CSRF, live roles and revisions, and rolls back bindings and job changes on failure', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), employee = await ctx.login('preview-employee');
+  const requirement = await publishRequirement(pm), endpoint = `/requirements/${requirement.id}`;
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [requirement.id] }).expect(201)).body;
+  await pm.agent.delete('/api' + endpoint).send({ revision: 0 }).expect(403);
+  for (const body of [{}, { revision: -1 }, { revision: '0' }]) await pm.send('delete', endpoint, body).expect(400);
+  await pm.send('delete', endpoint, { revision: 1 }).expect(409);
+  ctx.store.run("UPDATE users SET roles='[\"employee\"]' WHERE id='preview-business'");
+  await business.send('delete', endpoint, { revision: 0 }).expect(403);
+  const before = ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id);
+  const assetBefore = ctx.store.one('SELECT * FROM assets WHERE id=?', demo.id);
+  const messagesBefore = ctx.store.all('SELECT * FROM notifications WHERE requirement_id=? ORDER BY id', requirement.id);
+  const enqueue = ctx.requirementCalendar.enqueue;
+  ctx.requirementCalendar.enqueue = () => { throw new Error('simulated calendar queue failure'); };
+  try { await pm.send('delete', endpoint, { revision: 0 }).expect(500); }
+  finally { ctx.requirementCalendar.enqueue = enqueue; }
+  assert.deepEqual(ctx.store.one('SELECT * FROM requirements WHERE id=?', requirement.id), before);
+  assert.deepEqual(ctx.store.one('SELECT * FROM assets WHERE id=?', demo.id), assetBefore);
+  assert.deepEqual(ctx.store.all('SELECT * FROM notifications WHERE requirement_id=? ORDER BY id', requirement.id), messagesBefore);
+  assert.equal((await detail(employee, demo.id)).requirements[0].id, requirement.id);
+  assert.equal(ctx.store.one("SELECT COUNT(*) AS n FROM events WHERE action='requirement_delete'").n, 0);
+  await pm.send('delete', endpoint, { revision: 0 }).expect(200);
 });
