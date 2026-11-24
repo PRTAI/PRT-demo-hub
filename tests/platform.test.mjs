@@ -776,6 +776,9 @@ test('only product managers and business users can publish requirements and publ
   const requirement = await publishRequirement(pm), businessRequirement = await publishRequirement(business, { title: '商务客户演示需求' });
   assert.equal(requirement.publisher.id, 'preview-pm'); assert.equal(businessRequirement.publisher.id, 'preview-business');
   await pm.send('post', '/requirements', { ...requirementContent, title: '  ' }).expect(400);
+  const { content, ...withoutRemarks } = requirementContent;
+  assert.equal((await pm.send('post', '/requirements', withoutRemarks).expect(201)).body.content, '');
+  assert.equal((await pm.send('post', '/requirements', { ...requirementContent, content: '   ' }).expect(201)).body.content, '');
   await business.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: 0 }).expect(403);
   await business.send('post', `/requirements/${requirement.id}/actions`, { revision: 0, action: 'close' }).expect(403);
   const edited = await pm.send('put', `/requirements/${requirement.id}`, { ...requirementContent, title: '修订后的需求', revision: 0 }).expect(200);

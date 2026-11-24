@@ -18,7 +18,7 @@ function Pager({ data, onPage, busy }) { return <div className="table-footer"><s
 export function RequirementPicker({ value, onChange, initialItems = [], disabled = false }) {
   const [query, setQuery] = useState(''), [page, setPage] = useState(1), [data, setData] = useState(null), [known, setKnown] = useState(initialItems), [error, setError] = useState(''), [loading, setLoading] = useState(true);
   useEffect(() => { const controller = new AbortController(); setLoading(true); const timer = setTimeout(() => api('/requirements?' + new URLSearchParams({ q: query, status: 'active', page: String(page) }), { signal: controller.signal }).then(result => { setData(result); setError(''); setKnown(items => [...items.filter(item => !result.items.some(next => next.id === item.id)), ...result.items]); }).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); }), query ? 200 : 0); return () => { clearTimeout(timer); controller.abort(); }; }, [query, page]);
-  return <section className="requirement-picker"><div className="requirement-picker-heading"><strong>关联需求</strong><span>可选多个；提交或发布前至少绑定一个需求</span></div><div className="requirement-tags">{value.map(id => <span key={id}>{known.find(item => item.id === id)?.title || '已选需求'}<button type="button" className="icon-button" aria-label={`移除需求 ${id}`} disabled={disabled} onClick={() => onChange(value.filter(item => item !== id))}><X size={13}/></button></span>)}</div><div className="search-box"><Search size={16}/><input aria-label="搜索可绑定需求" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} placeholder="按标题、内容或发布人搜索需求" disabled={disabled}/></div><ErrorBox>{error}</ErrorBox>{loading ? <Loading/> : <div className="requirement-options">{data?.items.map(item => <label key={item.id}><input type="checkbox" checked={value.includes(item.id)} disabled={disabled || (!value.includes(item.id) && value.length >= 20)} onChange={event => onChange(event.target.checked ? [...value, item.id] : value.filter(id => id !== item.id))}/><span><strong>{item.title}</strong><small>{item.publisher.name} · {item.category || '未分类'}</small></span></label>)}{!data?.items.length && <p className="muted">暂无匹配的进行中需求，请联系产品经理或商务发布。</p>}</div>}{data && data.pages > 1 && <Pager data={data} onPage={setPage} busy={loading}/>}</section>;
+  return <section className="requirement-picker"><div className="requirement-picker-heading"><strong>关联需求</strong><span>可选多个；提交或发布前至少绑定一个需求</span></div><div className="requirement-tags">{value.map(id => <span key={id}>{known.find(item => item.id === id)?.title || '已选需求'}<button type="button" className="icon-button" aria-label={`移除需求 ${id}`} disabled={disabled} onClick={() => onChange(value.filter(item => item !== id))}><X size={13}/></button></span>)}</div><div className="search-box"><Search size={16}/><input aria-label="搜索可绑定需求" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} placeholder="按标题、备注或发布人搜索需求" disabled={disabled}/></div><ErrorBox>{error}</ErrorBox>{loading ? <Loading/> : <div className="requirement-options">{data?.items.map(item => <label key={item.id}><input type="checkbox" checked={value.includes(item.id)} disabled={disabled || (!value.includes(item.id) && value.length >= 20)} onChange={event => onChange(event.target.checked ? [...value, item.id] : value.filter(id => id !== item.id))}/><span><strong>{item.title}</strong><small>{item.publisher.name} · {item.category || '未分类'}</small></span></label>)}{!data?.items.length && <p className="muted">暂无匹配的进行中需求，请联系产品经理或商务发布。</p>}</div>}{data && data.pages > 1 && <Pager data={data} onPage={setPage} busy={loading}/>}</section>;
 }
 
 export function RequirementsPage({ user, config, selectedId, refreshKey, onSelect, onOpenDemo, onCreateDemo, notify, onChanged, assignedOnly = false }) {
@@ -86,7 +86,7 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
     try { sessionStorage.removeItem(exportStorageKey); } catch { /* Progress recovery is optional. */ }
     setExportJob(null);
   }
-  function cancelEdit() { if (window.confirm('放弃尚未保存的需求内容？')) { setEditing(null); setError(''); setPendingDocuments([]); } }
+  function cancelEdit() { if (window.confirm('放弃尚未保存的需求修改？')) { setEditing(null); setError(''); setPendingDocuments([]); } }
   async function save(event) {
     event.preventDefault();
     const publishDate = editing.publishDate || editing.plannedDate || requirementDate(), deadlineDate = editing.deadlineDate || '';
@@ -104,7 +104,7 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
         setPendingDocuments(files => files.filter(item => item !== file));
       }
       setUploadProgress(0); setEditing(null); onSelect(result.id); refresh(); notify(editing.id ? '需求已更新' : '需求已发布');
-    } catch (error) { setError(saved ? `需求内容已保存，未完成的文档上传可再次保存重试：${error.message}` : error.message); }
+    } catch (error) { setError(saved ? `需求信息已保存，未完成的文档上传可再次保存重试：${error.message}` : error.message); }
     finally { setBusy(false); }
   }
   async function changeStatus(next) { if (next === detail.status) return; if (!window.confirm(`确认将需求状态修改为“${statusLabel(next)}”？`)) return; setBusy(true); setError(''); try { await api(`/requirements/${detail.id}/actions`, { method: 'POST', body: { revision: detail.revision, action: 'set_status', status: next } }); refresh(); notify('需求状态已更新'); } catch (error) { setError(error.message); } finally { setBusy(false); } }
@@ -135,23 +135,11 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
   }
   const publishDate = editing.publishDate || editing.plannedDate || requirementDate();
   return <>
-    <PageHeader title={editing.id ? '编辑需求' : '发布需求'} description="说明业务场景、需要的数据和验收标准，方便团队准备 Demo。"/>
+    <PageHeader title={editing.id ? '编辑需求' : '发布需求'} description="先附上需求文档，再填写标题、日期和负责人，方便团队准备 Demo。"/>
     <form className="settings-card requirement-form" onSubmit={save}>
       <ErrorBox>{error}</ErrorBox>
-      <label className="field">需求标题 <b>*</b><input autoFocus required maxLength={120} value={editing.title} onChange={event => setEditing({ ...editing, title: event.target.value })} disabled={busy}/></label>
-      <label className="field">业务分类<select value={editing.category} onChange={event => setEditing({ ...editing, category: event.target.value })} disabled={busy}><option value="">未分类</option>{[...new Set([...(config?.categories || []), editing.category].filter(Boolean))].map(category => <option key={category}>{category}</option>)}</select></label>
-      <div className="requirement-date-fields">
-        <label className="field">发布日期 <b>*</b><input type="date" min="1900-01-01" max="2199-12-31" required value={publishDate} onChange={event => setEditing({ ...editing, publishDate: event.target.value })} disabled={busy}/><small>默认今天（北京时间）。</small></label>
-        <label className="field">截止日期（可选）<input type="date" min={publishDate} max="2199-12-31" value={editing.deadlineDate || ''} onChange={event => setEditing({ ...editing, deadlineDate: event.target.value })} disabled={busy}/><small>填写后，飞书全天日程覆盖发布日至截止日，不占用忙闲时间。</small></label>
-      </div>
-      <label className="field">需求内容 <b>*</b><textarea required rows={12} maxLength={20000} value={editing.content} onChange={event => setEditing({ ...editing, content: event.target.value })} disabled={busy} placeholder="请描述业务背景、演示场景、所需数据内容及验收标准。"/></label>
-      <div className="requirement-owner-fields">
-        <OwnerPicker title="商务负责人" description="负责业务沟通与客户对接" users={assigneeUsers} roles={businessOwnerRoles} selectedUsers={editing.businessOwners || []} value={editing.businessUserIds || editing.businessOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, businessUserIds: ids }))} disabled={busy}/>
-        <OwnerPicker title="研发负责人" description="负责技术实现与 Demo 交付" users={assigneeUsers} roles={developmentOwnerRoles} selectedUsers={editing.developmentOwners || []} value={editing.developmentUserIds || editing.developmentOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, developmentUserIds: ids }))} disabled={busy}/>
-      </div>
-      <p className="requirement-owner-hint">两组均可不选或多选。发布后通知两组负责人及发布人，并邀请参加需求日程；转发新增人员归入研发负责人。</p>
       <div className="requirement-document-picker">
-        <strong>需求文档（可选，可多选）</strong>
+        <strong>附加需求文档（可选，可多选）</strong>
         <p className="muted">支持拖入多个文件，也可多次点击添加，已选文件会保留并自动去重。单文件 ≤ {config?.maxFileMB || 512} MB。</p>
         <input ref={documentInput} type="file" multiple hidden aria-label="选择需求文档" disabled={busy} onChange={event => { addDocuments(Array.from(event.target.files || [])); event.target.value = ''; }}/>
         <button type="button" className={`requirement-document-dropzone ${dragging ? 'dragging' : ''}`} disabled={busy} onClick={() => documentInput.current.click()} onDragEnter={event => { event.preventDefault(); if (!busy && Array.from(event.dataTransfer.types || []).includes('Files')) { dragDepth.current++; setDragging(true); } }} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; }} onDragLeave={event => { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }} onDrop={dropDocuments}>
@@ -162,7 +150,19 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
         <p className="muted" role="status">待上传 {pendingDocuments.length} 个文档{busy && uploadProgress > 0 ? ` · 当前文件上传进度 ${uploadProgress}%` : ''}</p>
         <div className="requirement-pending-documents">{pendingDocuments.map((file, index) => <div key={index}><FileText size={16}/><span>{file.name}<small>{bytes(file.size)}</small></span><button type="button" className="icon-button" disabled={busy} aria-label={`移除待上传文档 ${file.name}`} onClick={() => setPendingDocuments(current => current.filter(item => item !== file))}><X size={16}/></button></div>)}</div>
       </div>
-      <div className="requirement-actions"><button type="button" className="button" onClick={cancelEdit} disabled={busy}>取消</button><button className="button primary" disabled={busy || !editing.title.trim() || !editing.content.trim()}>{busy ? '保存中…' : editing.id ? '保存修改' : '发布需求'}</button></div>
+      <label className="field">需求标题 <b>*</b><input autoFocus required maxLength={120} value={editing.title} onChange={event => setEditing({ ...editing, title: event.target.value })} disabled={busy}/></label>
+      <label className="field">业务分类<select value={editing.category} onChange={event => setEditing({ ...editing, category: event.target.value })} disabled={busy}><option value="">未分类</option>{[...new Set([...(config?.categories || []), editing.category].filter(Boolean))].map(category => <option key={category}>{category}</option>)}</select></label>
+      <div className="requirement-date-fields">
+        <label className="field">发布日期 <b>*</b><input type="date" min="1900-01-01" max="2199-12-31" required value={publishDate} onChange={event => setEditing({ ...editing, publishDate: event.target.value })} disabled={busy}/><small>默认今天（北京时间）。</small></label>
+        <label className="field">截止日期（可选）<input type="date" min={publishDate} max="2199-12-31" value={editing.deadlineDate || ''} onChange={event => setEditing({ ...editing, deadlineDate: event.target.value })} disabled={busy}/><small>填写后，飞书全天日程覆盖发布日至截止日，不占用忙闲时间。</small></label>
+      </div>
+      <div className="requirement-owner-fields">
+        <OwnerPicker title="商务负责人" description="负责业务沟通与客户对接" users={assigneeUsers} roles={businessOwnerRoles} selectedUsers={editing.businessOwners || []} value={editing.businessUserIds || editing.businessOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, businessUserIds: ids }))} disabled={busy}/>
+        <OwnerPicker title="研发负责人" description="负责技术实现与 Demo 交付" users={assigneeUsers} roles={developmentOwnerRoles} selectedUsers={editing.developmentOwners || []} value={editing.developmentUserIds || editing.developmentOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, developmentUserIds: ids }))} disabled={busy}/>
+      </div>
+      <p className="requirement-owner-hint">两组均可不选或多选。发布后通知两组负责人及发布人，并邀请参加需求日程；转发新增人员归入研发负责人。</p>
+      <label className="field">备注（可选）<textarea rows={4} maxLength={20000} value={editing.content} onChange={event => setEditing({ ...editing, content: event.target.value })} disabled={busy} placeholder="补充说明，可粘贴飞书文档链接。"/></label>
+      <div className="requirement-actions"><button type="button" className="button" onClick={cancelEdit} disabled={busy}>取消</button><button className="button primary" disabled={busy || !editing.title.trim()}>{busy ? '保存中…' : editing.id ? '保存修改' : '发布需求'}</button></div>
     </form>
   </>;
 }
@@ -185,7 +185,7 @@ function OwnerPicker({ title, description, users, roles, selectedUsers, value, o
 function RequirementList({ data, loading, query, setQuery, status, setStatus, onSelect, canPublish, canExport, page, onPage, exporting, exportJob, onExport, onRetryExport, onRefreshExport, onCloseExport }) {
   return <section className="asset-panel requirements-panel">
     <div className="panel-title"><div><h2>需求列表</h2><span>{data?.total || 0} 项需求</span></div></div>
-    <div className="filter-row"><div className="search-box"><Search size={17}/><input aria-label="搜索需求或负责人" placeholder="搜索负责人、需求标题、内容或发布人…" value={query} onChange={event => setQuery(event.target.value)}/></div><StatusMenu value={status} onChange={setStatus} ariaLabel="需求状态"/>{canExport && data?.canExport && <button type="button" className="button" disabled={loading || exporting || ['pending', 'ready'].includes(exportJob?.status) || !data?.total} onClick={onExport} title="同步当前筛选下的需求飞书文档，完成后导出全部结果"><ArrowDownToLine size={16}/>{exporting ? '提交中…' : exportJob?.status === 'pending' ? '同步文档中…' : exportJob?.status === 'ready' ? '下载中…' : '导出 Excel'}</button>}</div>
+    <div className="filter-row"><div className="search-box"><Search size={17}/><input aria-label="搜索需求或负责人" placeholder="搜索负责人、需求标题、备注或发布人…" value={query} onChange={event => setQuery(event.target.value)}/></div><StatusMenu value={status} onChange={setStatus} ariaLabel="需求状态"/>{canExport && data?.canExport && <button type="button" className="button" disabled={loading || exporting || ['pending', 'ready'].includes(exportJob?.status) || !data?.total} onClick={onExport} title="同步当前筛选下的需求飞书文档，完成后导出全部结果"><ArrowDownToLine size={16}/>{exporting ? '提交中…' : exportJob?.status === 'pending' ? '同步文档中…' : exportJob?.status === 'ready' ? '下载中…' : '导出 Excel'}</button>}</div>
     {canExport && exportJob && <div className="requirement-export-progress" role="status" aria-live="polite">
       <strong>{exportJob.status === 'ready' ? '文档同步完成，正在准备下载表格' : exportJob.status === 'failed' ? '部分飞书文档同步失败，请重试失败项' : '正在创建或更新筛选需求的飞书文档'}</strong>
       <p>{exportJob.total === undefined ? '正在恢复导出进度…' : `共 ${exportJob.total} 条需求 · 已完成 ${exportJob.completed} 条 · 等待 ${exportJob.pending} 条${exportJob.failed ? ` · 失败 ${exportJob.failed} 条` : ''}`}</p>
@@ -305,17 +305,17 @@ function RequirementDetail({ detail, canCreateDemo, busy, binding, setBinding, o
         <section className="settings-card requirement-detail">
           <div className="requirement-title"><h2>{detail.title}</h2><span className={`requirement-status ${detail.status}`}>{statusLabel(detail.status)}</span><ShareLink url={detail.shareUrl}/></div>
           <div className="requirement-meta requirement-list-meta"><span>发布人 {detail.publisher.name} · {detail.category || '未分类'} · 发布日期 {detail.publishDate}</span><RequirementDeadline requirement={detail}/><span>更新于 {date(detail.updatedAt)}</span></div>
-          <div className="requirement-content">{renderLinkedText(detail.content)}</div>
+          <div className="requirement-detail-block">
+            <h3><FileText size={15}/>附加需求文档<span>{detail.documents?.length || 0} 个文件</span></h3>
+            {detail.documents?.length ? <div className="requirement-document-list">{detail.documents.map(file => <a className="requirement-document" key={file.id} href={`/api/requirements/${detail.id}/documents/${file.id}/download`}><FileText size={16}/><span>{file.name}<small>{Math.ceil(file.size / 1024)} KB</small></span><ArrowDownToLine size={16}/></a>)}</div> : <p className="muted requirement-empty-note">暂无需求文档</p>}
+          </div>
+          {!!detail.content?.trim() && <div className="requirement-detail-block"><h3>备注</h3><div className="requirement-content">{renderLinkedText(detail.content)}</div></div>}
           <RequirementLinkPreviews key={`${detail.id}:${detail.revision}`} requirement={detail}/>
           {(detail.canManage || detail.canStatusManage || detail.canForward) && <div className="requirement-actions">{detail.canForward && <button type="button" className="button" disabled={busy} onClick={() => setForwarding(true)}><Forward size={15}/>转发需求</button>}{detail.canManage && <button className="button" disabled={busy} onClick={onEdit}>编辑需求 / 上传文档</button>}{detail.canStatusManage && <StatusMenu value={detail.status} onChange={onStatus} ariaLabel="修改需求状态" disabled={busy} filter={false}/>}</div>}
         </section>
-        <section className="settings-card requirement-documents">
-          <div className="panel-title"><div><h2><FileText size={16}/>需求文档</h2><span>{detail.documents?.length || 0} 个文件</span></div></div>
-          {detail.documents?.length ? <div className="requirement-document-list">{detail.documents.map(file => <a className="requirement-document" key={file.id} href={`/api/requirements/${detail.id}/documents/${file.id}/download`}><FileText size={16}/><span>{file.name}<small>{Math.ceil(file.size / 1024)} KB</small></span><ArrowDownToLine size={16}/></a>)}</div> : <p className="muted requirement-empty-note">暂无需求文档</p>}
-        </section>
         <section className="asset-panel requirement-demos">
           <div className="panel-title"><div><h2>关联 Demo</h2><span>{detail.demos.length} 个可见 Demo</span></div>{['open', 'needs_update'].includes(detail.status) && <div className="requirement-actions">{canCreateDemo && <button className="button" onClick={() => onCreateDemo(detail)}><Plus size={15}/>上传 Demo</button>}{detail.canManage && <button className="button primary" onClick={() => setBinding(value => !value)}><Link2 size={15}/>{binding ? '收起绑定' : '绑定已有 Demo'}</button>}</div>}</div>
-          <p className="requirement-access-note">仅展示你有权查看的 Demo；员工或主管可上传 Demo 并默认关联当前需求，需求内容与文档仍由发布人管理。</p>
+          <p className="requirement-access-note">仅展示你有权查看的 Demo；员工或主管可上传 Demo 并默认关联当前需求，需求信息与文档仍由发布人管理。</p>
           {binding && detail.canManage && <BindDemo requirement={detail} onBound={onBound}/>}
           {detail.demos.length ? <div className="requirement-demo-list">{detail.demos.map(asset => <div key={asset.id}><button className="requirement-demo-open" onClick={() => onOpenDemo(asset.id)}><div><strong>{asset.latest.description.title || '未命名 Demo'}</strong><small>{asset.owner.name} · V{asset.latest.number}</small></div><Badge status={asset.latest.status}/><ArrowUpRight size={15}/></button>{detail.canManage && <button className="button small" disabled={busy} onClick={() => onUnbind(asset)}>解除绑定</button>}</div>)}</div> : <Empty title="还没有可见的关联 Demo" description={detail.canManage ? '可以绑定已有 Demo。' : '此处仅展示你有权查看的关联 Demo。'}/>}
         </section>

@@ -15,7 +15,8 @@ import { platformLink } from '../shared/platform-links.mjs';
 
 const userIdsSchema = z.array(z.string().trim().min(1).max(100)).max(100);
 const dateSchema = z.string().refine(value => value === '' || validRequirementDate(value), '请选择有效日期').optional();
-const contentSchema = z.object({ title: z.string().trim().min(1).max(120), content: z.string().trim().min(1).max(20000), category: z.string().trim().max(80).default(''), assignedUserIds: userIdsSchema.default([]), businessUserIds: userIdsSchema.optional(), developmentUserIds: userIdsSchema.optional(), plannedDate: dateSchema, publishDate: dateSchema, deadlineDate: dateSchema });
+// `content` holds the optional 备注 (remarks); requirement documents carry the main specification.
+const contentSchema = z.object({ title: z.string().trim().min(1).max(120), content: z.string().trim().max(20000).default(''), category: z.string().trim().max(80).default(''), assignedUserIds: userIdsSchema.default([]), businessUserIds: userIdsSchema.optional(), developmentUserIds: userIdsSchema.optional(), plannedDate: dateSchema, publishDate: dateSchema, deadlineDate: dateSchema });
 const revisionSchema = z.object({ revision: z.number().int().nonnegative() });
 const idsSchema = z.array(z.uuid()).max(20).transform(ids => [...new Set(ids)]);
 const filterSchema = z.object({ q: z.string().max(200).default(''), status: z.enum(['all', 'active', 'open', 'needs_update', 'delivered', 'closed']).default('all'), assigned: z.enum(['0', '1']).default('0') });
@@ -263,7 +264,7 @@ export function createRequirements(app, store, helpers) {
     const requirement = requirementFor(req.params.id);
     if (!canView(req.user, requirement)) fail(403, '该需求未指定给当前账号');
     const url = z.string().max(2000).parse(req.query.url);
-    if (!textLinks(requirement.content).includes(url) || !feishuDocumentLink(url)) fail(400, '只能预览该需求正文中的飞书文档链接');
+    if (!textLinks(requirement.content).includes(url) || !feishuDocumentLink(url)) fail(400, '只能预览该需求备注中的飞书文档链接');
     res.json(await previewFeishuDocument(url, helpers.documentToken(req)));
   });
   app.post('/api/requirements/:id/actions', (req, res) => {

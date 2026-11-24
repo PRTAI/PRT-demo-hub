@@ -77,9 +77,16 @@
 .requirement-detail .requirement-title h2 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 .requirement-detail .requirement-title .share-link { margin-left: auto; }
 .requirement-meta { padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-.requirement-content { margin: 16px 0 20px; color: var(--fg); font-size: 14px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; }
-.requirement-detail > .requirement-actions { padding-top: 16px; border-top: 1px solid var(--border); }
-.feishu-link-previews { display: grid; gap: 10px; margin: -4px 0 20px; }
+/* Documents lead the detail body; the optional remarks follow them. */
+.requirement-detail-block { margin-top: 18px; }
+.requirement-detail-block > h3 { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--fg); font-size: 13px; font-weight: 600; }
+.requirement-detail-block > h3 > svg { flex: none; color: var(--primary); }
+.requirement-detail-block > h3 > span { margin-left: 4px; color: var(--fg-subtle); font-size: 12px; font-weight: 400; }
+.requirement-detail-block > .requirement-document-list { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.requirement-detail-block > .requirement-empty-note { padding: 14px 16px; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
+.requirement-content { color: var(--fg); font-size: 14px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; }
+.requirement-detail > .requirement-actions { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.feishu-link-previews { display: grid; gap: 10px; margin-top: 12px; }
 .feishu-link-card { display: flex; align-items: flex-start; gap: 12px; max-width: 760px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--primary); }
 .feishu-link-card > svg { flex: none; margin-top: 2px; }
 .feishu-link-card > div { flex: 1; min-width: 0; }
@@ -90,8 +97,6 @@
 .feishu-link-card p { display: -webkit-box; margin-top: 8px; overflow: hidden; color: var(--fg-muted); font-size: 12px; line-height: 1.8; white-space: pre-wrap; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
 .feishu-link-card .button { flex: none; }
 
-.requirement-documents { padding: 0; overflow: hidden; }
-.requirement-documents .panel-title h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
 .requirement-document-list { display: flex; flex-direction: column; }
 .requirement-document { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--fg); text-decoration: none; transition: background-color .12s; }
 .requirement-document:last-child { border-bottom: 0; }
@@ -157,6 +162,7 @@
 .requirement-owner-options small { display: block; color: var(--fg-subtle); font-size: 11px; }
 .requirement-owner-options > .muted { padding: 8px; }
 .requirement-owner-hint { margin: 10px 0 20px; color: var(--fg-subtle); font-size: 12px; line-height: 1.7; }
+.requirement-form > .requirement-document-picker { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
 .requirement-document-picker > strong { font-size: 13px; font-weight: 500; }
 .requirement-document-picker > .muted { margin: 4px 0 10px; }
 .requirement-document-picker > .error-box { margin: 10px 0 0; }
