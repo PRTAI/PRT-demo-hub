@@ -26,7 +26,7 @@ import { platformLink } from '../shared/platform-links.mjs';
 
 const roles = ['employee', 'supervisor', 'pm', 'business', 'admin'];
 const working = ['draft', 'pending', 'returned'];
-const descriptionSchema = z.object({ title: z.string().max(120).default(''), summary: z.string().max(500).default(''), category: z.string().max(80).default(''), tags: z.array(z.string().max(30)).max(12).default([]), content: z.string().max(20000).default(''), usage: z.string().max(20000).default(''), costEstimate: z.string().max(5000).default(''), difficulty: z.string().max(5000).default(''), notes: z.string().max(10000).default(''), changes: z.string().max(5000).default(''), schemaVersion: z.literal(1).default(1) });
+const descriptionSchema = z.object({ title: z.string().max(120).default(''), summary: z.string().max(500).default(''), category: z.string().max(80).default(''), tags: z.array(z.string().max(30)).max(12).default([]), content: z.string().max(20000).default(''), usage: z.string().max(20000).default(''), costEstimate: z.string().max(5000).default(''), difficulty: z.string().max(5000).default(''), changes: z.string().max(5000).default(''), schemaVersion: z.literal(1).default(1) });
 const revisionSchema = z.object({ revision: z.number().int().nonnegative() });
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };

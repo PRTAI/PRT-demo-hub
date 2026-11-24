@@ -45,7 +45,7 @@ for (let i = 1; i <= 30; i++) {
   const assetId = `${marker}${String(i).padStart(3,'0')}`; if (one('SELECT id FROM assets WHERE id=?', assetId)) continue;
   const owner = owners[(i - 1) % owners.length], template = templates[(i - 1) % templates.length], status = statuses[(i - 1) % statuses.length], time = new Date(Date.now() - i * 3600000).toISOString();
   const versionId = uuid(`${assetId}-v1`), fileId = uuid(`${assetId}-file-v1`), title = `${template[0]} · 测试${String(i).padStart(2,'0')}`;
-  const description = { title, summary: template[3], category: template[1], tags: [...template[2], '测试数据'], content: `数据覆盖${template[2].join('、')}等主题，包含日期、组织、指标值和状态字段。所有记录均为系统生成的测试数据。`, usage: `用于验证列表筛选、自然语言检索、文件预览、下载、审核与版本管理。检索示例：查找${template[2][0]}相关的数据。`, notes: '仅用于平台功能测试，不代表真实业务数据。', changes: '', schemaVersion: 1 };
+  const description = { title, summary: template[3], category: template[1], tags: [...template[2], '测试数据'], content: `数据覆盖${template[2].join('、')}等主题，包含日期、组织、指标值和状态字段。所有记录均为系统生成的测试数据。`, usage: `用于验证列表筛选、自然语言检索、文件预览、下载、审核与版本管理。检索示例：查找${template[2][0]}相关的数据。`, changes: '', schemaVersion: 1 };
   const csv = Buffer.from(`record_id,date,region,metric,status\n${i}001,2026-08-01,华东,${100+i},正常\n${i}002,2026-08-02,华南,${120+i},正常\n`, 'utf8'), checksum = createHash('sha256').update(csv).digest('hex');
   tx(() => {
     run('INSERT INTO assets(id,owner_id,creator_id,current_version_id,next_number,created_at,updated_at) VALUES(?,?,?,?,2,?,?)', assetId, owner.id, owner.id, status === 'published' ? versionId : null, time, time);

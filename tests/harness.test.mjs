@@ -45,6 +45,7 @@ test('delegated employee sees assigned requirements and uploads a draft with ori
   await upload(0).expect(201); await upload(0).expect(409);
   const saved = (await get('/assets/' + created.body.id).expect(200)).body;
   assert.equal(saved.latest.status, 'draft'); assert.equal(saved.latest.files[0].name, 'sample.csv');
+  assert.equal(saved.latest.description.notes, undefined, 'legacy 注意事项 input is accepted but dropped');
   assert.ok(saved.requirements.some(row => row.id === requirement.id));
   await request(app).post(`/api/versions/${created.body.versionId}/actions`).set('Authorization', bearer).send({ revision: 1, action: 'publish' }).expect(403);
   store.run('UPDATE users SET enabled=0 WHERE id=?', 'harness-preview-member');

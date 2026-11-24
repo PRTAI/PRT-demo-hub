@@ -35,7 +35,7 @@ export function seedPreview(store) {
     ];
     samples.forEach(([title, summary, category, tags, status, owner, filename], i) => {
       const assetId = uid(), versionId = uid(), fileId = uid(), time = new Date(Date.now() - (i + 1) * 7200000).toISOString();
-      const description = { title, summary, category, tags, content: '演示用合成数据，包含编号、业务维度与指标字段。文件内容仅用于体验平台的上传、说明、审核和版本流程。', usage: '1. 下载数据文件。\n2. 使用表格软件或文本编辑器打开。\n3. 按业务字段进行筛选、汇总或导入分析工具。', notes: '此条目为平台预览数据，不是真实企业业务数据。', changes: '首次建立数据样例。', schemaVersion: 1 };
+      const description = { title, summary, category, tags, content: '演示用合成数据，包含编号、业务维度与指标字段。文件内容仅用于体验平台的上传、说明、审核和版本流程。', usage: '1. 下载数据文件。\n2. 使用表格软件或文本编辑器打开。\n3. 按业务字段进行筛选、汇总或导入分析工具。', changes: '首次建立数据样例。', schemaVersion: 1 };
       const bytes = Buffer.from(filename.endsWith('.json') ? JSON.stringify([{ id: 1, region: '华东', value: 128 }, { id: 2, region: '华南', value: 96 }], null, 2) : '\uFEFFid,region,value\n1,华东,128\n2,华南,96\n');
       fs.writeFileSync(path.join(store.root, 'files', fileId), bytes);
       run('INSERT INTO assets(id,owner_id,creator_id,current_version_id,created_at,updated_at) VALUES(?,?,?,?,?,?)', assetId, owner, owner, status === 'published' ? versionId : null, time, time);

@@ -172,19 +172,21 @@ test('wiki validates its configured sample and skips all external writes in prev
   assert.equal(ctx.job().status, 'synced'); assert.equal(ctx.nodes[0].parent_node_token, undefined);
 });
 
-test('wiki automatically copies the five saved Demo description sections and keeps manual blocks when descriptions change', async t => {
+test('wiki automatically copies the four saved Demo description sections and keeps manual blocks when descriptions change', async t => {
   const ctx = fixture(t);
   ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
   const demo = ctx.demo({ title: '负责人上传样例', summary: '简介内容', content: '# 数据概述\n概述甲\n# 数据格式\n格式甲', costEstimate: '成本甲', difficulty: '难度甲', notes: '注意甲' });
+  // 注意事项 was removed from Demo descriptions; legacy values must no longer reach the wiki.
   ctx.blocks.set('ManualDemo', { block_type: 2, text: { elements: [{ text_run: { content: '人工补充：请保留' } }] } });
   ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   assert.equal(ctx.wiki.info(ctx.id).status, 'synced'); assert.equal(ctx.nodes.length, 1);
   let content = ctx.documentText();
-  for (const value of ['负责人上传样例', 'V1 · 草稿', '数据概述', '概述甲', '数据格式', '格式甲', '成本预估', '成本甲', '难度说明', '难度甲', '注意事项', '注意甲', '人工补充：请保留']) assert.ok(content.includes(value), value);
+  for (const value of ['负责人上传样例', 'V1 · 草稿', '数据概述', '概述甲', '数据格式', '格式甲', '成本预估', '成本甲', '难度说明', '难度甲', '人工补充：请保留']) assert.ok(content.includes(value), value);
+  for (const value of ['注意事项', '注意甲']) assert.ok(!content.includes(value), value);
   const links = [...ctx.blocks.values()].flatMap(block => block.text?.elements || []).map(element => element.text_run.text_element_style?.link?.url).filter(Boolean);
   assert.ok(links.includes('http://data.prt-ai.cn:8001/?demo=' + demo.id));
   const blockCount = ctx.blocks.size;
-  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '新名称', content: '# 数据概述\n概述乙\n# 数据格式\n格式乙', costEstimate: '成本乙', difficulty: '难度乙', notes: '' }), demo.versionId);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '新名称', content: '# 数据概述\n概述乙\n# 数据格式\n格式乙', costEstimate: '成本乙', difficulty: '难度乙' }), demo.versionId);
   ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   content = ctx.documentText(); assert.equal(ctx.blocks.size, blockCount);
   for (const value of ['新名称', '概述乙', '格式乙', '成本乙', '难度乙', '人工补充：请保留']) assert.ok(content.includes(value), value);
@@ -232,7 +234,7 @@ test('wiki persists Demo append requests across restarts and retries without dup
 
 test('wiki splits long saved descriptions into API-sized blocks and batches while preserving all content', async t => {
   const ctx = fixture(t), long = '长段落🙂'.repeat(4000);
-  for (let index = 0; index < 10; index++) ctx.demo({ title: '长说明 Demo ' + index, content: long, costEstimate: '完整成本', difficulty: '完整难度', notes: '完整注意事项' });
+  for (let index = 0; index < 10; index++) ctx.demo({ title: '长说明 Demo ' + index, content: long, costEstimate: '完整成本', difficulty: '完整难度' });
   ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
   assert.equal(ctx.job().status, 'synced');
   const append = ctx.calls.filter(call => call.method === 'POST' && call.url.pathname.endsWith('/children') && !call.body.index);
@@ -245,7 +247,7 @@ test('wiki splits long saved descriptions into API-sized blocks and batches whil
 
 test('export preparation creates the missing historical wiki, copies saved Demo sections and later refreshes the same document', async t => {
   const ctx = fixture(t), exports = createRequirementExports(ctx.store, ctx.wiki);
-  const demo = ctx.demo({ title: '旧数据 Demo', content: '# 数据概述\n旧数据概述\n# 数据格式\n旧数据格式', costEstimate: '旧数据成本', difficulty: '旧数据难度', notes: '旧数据注意事项' });
+  const demo = ctx.demo({ title: '旧数据 Demo', content: '# 数据概述\n旧数据概述\n# 数据格式\n旧数据格式', costEstimate: '旧数据成本', difficulty: '旧数据难度' });
   const selected = [{ id: ctx.id, title: '历史需求', rows: [{ title: '需求快照', deadlineDate: '', demoName: '旧数据 Demo', associatedPeople: '负责人', documentUrl: '' }] }];
   assert.equal(ctx.wiki.info(ctx.id).status, 'not_created'); assert.equal(ctx.wiki.configurationError(), '');
   const job = exports.create('preview-pm', { status: 'open' }, selected);
@@ -253,13 +255,13 @@ test('export preparation creates the missing historical wiki, copies saved Demo 
   await ctx.wiki.drain();
   assert.equal(exports.status(job.id, 'preview-pm').status, 'ready');
   assert.equal(exports.rows(job.id, 'preview-pm')[0].documentUrl, 'https://team.feishu.cn/wiki/Wiki1');
-  for (const value of ['旧数据概述', '旧数据格式', '旧数据成本', '旧数据难度', '旧数据注意事项']) assert.ok(ctx.documentText().includes(value));
+  for (const value of ['旧数据概述', '旧数据格式', '旧数据成本', '旧数据难度']) assert.ok(ctx.documentText().includes(value));
   const blockCount = ctx.blocks.size;
-  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '旧数据 Demo', content: '# 数据概述\n更新概述\n# 数据格式\n更新格式', costEstimate: '更新成本', difficulty: '更新难度', notes: '更新注意事项' }), demo.versionId);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '旧数据 Demo', content: '# 数据概述\n更新概述\n# 数据格式\n更新格式', costEstimate: '更新成本', difficulty: '更新难度' }), demo.versionId);
   const again = exports.create('preview-pm', { status: 'open' }, selected);
   await ctx.wiki.drain();
   assert.equal(exports.status(again.id, 'preview-pm').status, 'ready');
   assert.equal(ctx.nodes.length, 1); assert.equal(ctx.blocks.size, blockCount);
-  for (const value of ['更新概述', '更新格式', '更新成本', '更新难度', '更新注意事项']) assert.ok(ctx.documentText().includes(value));
-  assert.ok(!ctx.documentText().includes('旧数据注意事项'));
+  for (const value of ['更新概述', '更新格式', '更新成本', '更新难度']) assert.ok(ctx.documentText().includes(value));
+  assert.ok(!ctx.documentText().includes('旧数据难度'));
 });

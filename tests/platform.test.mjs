@@ -422,7 +422,7 @@ test('business can view and download every Demo but cannot change data', async t
   assert.equal(detail.body.latest.id, detail.body.versions[0].id);
   assert.equal(detail.body.latest.description.content, description.content);
   assert.equal(detail.body.latest.description.difficulty, description.difficulty);
-  for (const hidden of ['costEstimate', 'notes', 'changes', 'usage']) assert.equal(detail.body.latest.description[hidden], undefined);
+  for (const hidden of ['costEstimate', 'changes', 'usage']) assert.equal(detail.body.latest.description[hidden], undefined);
   assert.deepEqual(detail.body.events, []); assert.deepEqual(detail.body.submissions, []);
   await business.get(`/versions/${demo.versionId}/files/${detail.body.latest.files[0].id}/download`).expect(200);
   await business.send('post', '/assets', { description }).expect(403);
@@ -534,12 +534,12 @@ test('description agent runs in background, preserves the draft and queues reque
   await owner.upload(demo.versionId, 0, 'preview.zip', fs.readFileSync(new URL('./fixtures/preview.zip', import.meta.url))).expect(201);
   const queued = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(202);
   assert.ok(['pending','running'].includes(queued.body.status));
-  await owner.send('put', `/versions/${demo.versionId}`, { revision: 1, description: { ...description, notes: '生成期间继续编辑' } }).expect(200);
+  await owner.send('put', `/versions/${demo.versionId}`, { revision: 1, description: { ...description, changes: '生成期间继续编辑' } }).expect(200);
   let job; for (let i=0;i<50;i++) { job=(await owner.get(`/description/jobs/${queued.body.id}`).expect(200)).body; if (['complete','failed'].includes(job.status)) break; await new Promise(resolve=>setTimeout(resolve,10)); }
   assert.equal(job.status, 'complete'); assert.equal(job.result.markdown, markdown); assert.match(prompt, /folder\/code\.py/);
   const latest = await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200); assert.equal(latest.body.id, queued.body.id);
   const unchanged = await detail(owner, demo.id); assert.equal(unchanged.latest.description.content, description.content);
-  assert.equal(unchanged.latest.description.notes, '生成期间继续编辑');
+  assert.equal(unchanged.latest.description.changes, '生成期间继续编辑');
   assert.ok(ctx.notifications.list().some(item => item.kind === 'description_generated' && item.recipient_id === 'preview-employee'));
   await owner.send('post', `/description/jobs/${queued.body.id}/review`, { action: 'accepted' }).expect(200);
   await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200).then(response => assert.equal(response.body, null));
@@ -1158,7 +1158,7 @@ test('only PMs export the eight-column template with one requirement per row, se
   const link = 'https://team.feishu.cn/docx/DemoExport';
   const wikiUrl = 'https://team.feishu.cn/wiki/PublishedRequirement';
   ctx.store.run("UPDATE requirement_wiki SET url=?,status='synced' WHERE requirement_id=?", wikiUrl, first.id);
-  const firstDemo = (await employee.send('post', '/assets', { description: { ...description, title: '=导出 Demo A', content: `[飞书说明](${link})`, notes: '私密备注' }, requirementIds: [first.id] }).expect(201)).body;
+  const firstDemo = (await employee.send('post', '/assets', { description: { ...description, title: '=导出 Demo A', content: `[飞书说明](${link})` }, requirementIds: [first.id] }).expect(201)).body;
   await employee.send('post', '/assets', { description: { ...description, title: '导出 Demo B', content: '没有飞书文档链接' }, requirementIds: [first.id] }).expect(201);
   await other.send('post', '/assets', { description: { ...description, title: '其他人的 Demo', content: 'https://team.feishu.cn/docx/HiddenDemo' }, requirementIds: [first.id] }).expect(201);
   await other.send('post', '/assets', { description: { ...description, title: '无权查看的需求 Demo' }, requirementIds: [second.id] }).expect(201);
@@ -1285,7 +1285,7 @@ test('Demo uploads, saved descriptions, workflow and bindings queue all linked w
   const assetRevision = () => ctx.store.one('SELECT revision FROM assets WHERE id=?', demo.id).revision;
   const queuedAction = (client, value, reason = '') => queued(() => client.send('post', `/versions/${demo.versionId}/actions`, { revision: revision(), action: value, reason }).expect(200));
   const file = (await queued(() => employee.upload(demo.versionId, revision()).expect(201))).body;
-  await queued(() => employee.send('put', `/versions/${demo.versionId}`, { revision: revision(), description: { ...description, notes: '同步注意事项' } }).expect(200));
+  await queued(() => employee.send('put', `/versions/${demo.versionId}`, { revision: revision(), description: { ...description, difficulty: '同步难度更新' } }).expect(200));
   const beforeConflict = ctx.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', first.id).generation;
   await employee.send('put', `/versions/${demo.versionId}`, { revision: 0, description }).expect(409);
   assert.equal(ctx.store.one('SELECT generation FROM requirement_wiki WHERE requirement_id=?', first.id).generation, beforeConflict);

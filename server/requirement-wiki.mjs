@@ -168,7 +168,6 @@ export function createRequirementWiki(store, config) {
         ...(description.content ? paragraphs('数据说明\n' + description.content) : []),
         ...(description.costEstimate ? paragraphs('成本预估\n' + description.costEstimate) : []),
         ...(description.difficulty ? paragraphs('难度说明\n' + description.difficulty) : []),
-        ...(description.notes ? paragraphs('注意事项\n' + description.notes) : [])
       ];
     });
   }
