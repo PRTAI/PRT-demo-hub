@@ -4,10 +4,10 @@
 
 ## 更新当前已运行的容器并保留旧数据
 
-首次启用内置 DeepSeek 运维，请先按 [运维配置与部署](deepseek-ops.md)填写工作器随机密钥和 GitHub 令牌，并在更新命令末尾加 `-EnableOps`。启用后的后续更新脚本会自动保留工作器。运维开发、北京时间午夜备份及 feature/deepseek 自动提交也见该文档。
+更新后自动启用[每日完整备份](daily-backup.md)，默认每天北京时间 24:00 备份到 `D:\PRT-backups\daily\latest`，不依赖运维角色或 GitHub。首次启用内置 DeepSeek 运维，请先按 [运维配置与部署](deepseek-ops.md)填写工作器随机密钥和 GitHub 令牌，并在更新命令末尾加 `-EnableOps`。启用后的后续更新脚本会自动保留工作器。
 
 1. 将最新完整源码同步到 `J:\PRT-demo-hub-test`，包含 `scripts`、`server`、`src`、`shared`、`tests`、`docs`、`public`、Dockerfile、Compose、依赖清单，以及隐藏文件 `.gitignore`、`.dockerignore`。保留部署机 `.env`，不复制开发数据、`node_modules` 或 `dist`。通过 `scp *` 复制可能漏掉隐藏文件；更新脚本会先调用 `scripts/repair-docker-build.ps1` 补齐缺失的构建忽略文件，再检查完整源码。
-2. 启动 Docker Desktop，执行下面整段命令。脚本自动检查原数据卷、备份并导出到 J 盘、构建镜像、重建容器、检查健康状态。
+2. 启动 Docker Desktop，执行下面整段命令。脚本自动核对当前数据挂载、备份并导出到 J 盘、构建镜像、重建容器、检查健康状态。
 3. 成功后打开平台并按 `Ctrl+F5` 刷新。
 
 ```powershell
@@ -33,6 +33,8 @@ Invoke-RestMethod 'http://127.0.0.1:8001/api/health' -TimeoutSec 15
 ```
 
 内网地址：`http://192.168.110.25:8001`；公网地址：`http://data.prt-ai.cn:8001`。健康接口应返回 `ok: true`。
+
+模型难度与评测信息更新：无需修改 `.env` 或手工迁移数据库。同步完整源码（包含 `shared/demo-evaluation.mjs`、`server/description-evaluation.mjs`），运行上方更新命令并强制刷新页面。“大模型”分类显示模型难度、任务格式、Rollout 模型、每任务次数和通过率，确认 0% 正常保存及导出；其他分类不显示这些字段、不校验模型难度，AI 生成使用数据概述和数据格式。切换分类保留已有字段但隐藏，飞书文档和智能检索遵循同一分类规则；旧正文不批量重写，已有文档可点“同步当前内容”更新栏目。
 
 自动需求卡片和默认个人根目录导出无需新增环境变量；指定知识库需配置 `FEISHU_REQUIREMENT_EXPORT_WIKI_PARENT_URL`，数据库启动时自动升级。批量导出：项目经理按筛选点击“导出 Excel”，按提示完成飞书授权并继续本批；全部文档成功后自动下载表格。自动卡片验收：员工或主管上传新 Demo，不选择需求，保存后在“我的需求”查看自动卡片；项目经理、商务可编辑卡片及调整负责人。原有账号、Demo 和文件应仍可访问。
 
@@ -83,7 +85,7 @@ docker logs --tail 100 prt-datahub-production
 Invoke-RestMethod 'http://127.0.0.1:8001/api/health' -TimeoutSec 15
 ```
 
-现有平台使用 `compose.production.yaml` + `compose.keep-data.yaml`，保留 `prt-datahub-production_production-data` 和 `prt-datahub-production_production-backups` 两个数据卷。不要执行 `down -v` 或删除数据卷。单独 `restart` 不会更新镜像或加载新的环境变量。
+更新脚本沿用当前容器的数据挂载：原卷部署使用 `compose.keep-data.yaml`，灾难恢复后使用 `compose.recovery.yaml` 中的宿主机目录。恢复实例的数据位于 `J:\PRT-data-restored-20261122`，不要切回原数据卷。两者都叠加 `compose.daily-backup.yaml`，每日完整备份直接写入 `D:\PRT-backups\daily\latest`。不要执行 `down -v` 或删除数据卷。单独 `restart` 不会更新镜像或加载新的环境变量。
 
 更新脚本自动沿用当前容器所属的 Compose 项目，包括 `prt-datahub-current`，避免切回默认项目导致名称冲突。批量 Excel 与单条需求共用项目经理的用户授权，默认导出到其个人云文档。统一放到指定知识库时，新增 `FEISHU_REQUIREMENT_EXPORT_WIKI_PARENT_URL` 并按 [目标目录设置](requirements-export-update.md#将单条和批量导出放到指定知识库目录)补齐用户权限、重新授权。首次批量授权返回后点击“已授权，继续本批导出”。详情见 [导出及权限排查](requirements-export-update.md#批量导出的权限与失败排查)。
 

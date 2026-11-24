@@ -1,0 +1,23 @@
+services:
+  app:
+    environment:
+      DAILY_BACKUP_ENABLED: "true"
+      DAILY_BACKUP_DIR: /app/daily-backups
+      DAILY_BACKUP_CONFIG_DIR: /opt/deployment-config
+      DAILY_BACKUP_OPS_WORKSPACE_DIR: /app/ops-workspace-backup
+    volumes:
+      - type: bind
+        source: ${DAILY_BACKUP_HOST_DIR:-D:/PRT-backups/daily}
+        target: /app/daily-backups
+      - type: bind
+        source: .
+        target: /opt/deployment-config
+        read_only: true
+      - type: volume
+        source: ops-workspace
+        target: /app/ops-workspace-backup
+        read_only: true
+        volume:
+          nocopy: true
+volumes:
+  ops-workspace:

@@ -1,6 +1,6 @@
 import { createApp } from './app.mjs';
 import { validateBinding } from './runtime.mjs';
-const { app, config, store, notifications, requirementCalendar, requirementWiki, personalRequirementDocuments, requirementExports, opsMaintenance, opsAgent } = createApp();
+const { app, config, store, notifications, requirementCalendar, requirementWiki, personalRequirementDocuments, requirementExports, opsMaintenance, opsAgent, dailyBackup } = createApp();
 const host = process.env.HOST || '127.0.0.1', port = Number(process.env.PORT || 3100);
 validateBinding({ ...config, host, containerPreview: process.env.CONTAINER_PREVIEW === 'true' });
 for (const entry of (await import('node:fs')).readdirSync(store.root + '/tmp', { withFileTypes: true })) {
@@ -21,13 +21,14 @@ const stopNotifications = notifications.start();
 const stopRequirementCalendar = requirementCalendar.start();
 const stopRequirementWiki = requirementWiki.start();
 const stopOpsMaintenance = opsMaintenance.start();
+const stopDailyBackup = dailyBackup.start();
 let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
   console.log(`Received ${signal}; shutting down server`);
   if (stopping) return; stopping = true; stopNotifications();
   const calendarStopped = stopRequirementCalendar();
   const wikiStopped = stopRequirementWiki();
-  const opsStopped = Promise.all([stopOpsMaintenance(), opsAgent.stop()]);
+  const opsStopped = Promise.all([stopOpsMaintenance(), opsAgent.stop(), stopDailyBackup()]);
   server.close(async () => { await Promise.all([calendarStopped, wikiStopped, opsStopped, requirementExports.drain(), personalRequirementDocuments.drain()]); store.db.close(); process.exit(0); });
   server.closeIdleConnections();
   setTimeout(() => process.exit(1), 30000).unref();

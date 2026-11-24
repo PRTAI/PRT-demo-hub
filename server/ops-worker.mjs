@@ -78,9 +78,10 @@ export function initializeOpsWorkspace(seed, base) {
   const snapshot = sourceSnapshot(seed), root = path.join(base, snapshot.hash);
   if (!fs.existsSync(path.join(root, '.ready'))) {
     materializeSource(snapshot, root);
-    if (!fs.existsSync(path.join(root, 'node_modules'))) fs.symlinkSync('/opt/ops/node_modules', path.join(root, 'node_modules'), 'dir');
     fs.writeFileSync(path.join(root, '.ready'), snapshot.hash);
   }
+  // Dependency links are rebuilt after restoring the persistent workspace.
+  if (!fs.existsSync(path.join(root, 'node_modules'))) fs.symlinkSync('/opt/ops/node_modules', path.join(root, 'node_modules'), 'dir');
   const old = fs.readdirSync(base, { withFileTypes: true }).filter(entry => entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name) && entry.name !== snapshot.hash).map(entry => ({ path: path.join(base, entry.name), time: fs.statSync(path.join(base, entry.name)).mtimeMs })).sort((a, b) => b.time - a.time);
   for (const entry of old.slice(1)) fs.rmSync(entry.path, { recursive: true, force: true });
   return root;

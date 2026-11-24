@@ -2,11 +2,12 @@
 
 面向企业内部员工、主管和产品经理的 Demo 文件管理平台，支持飞书登录、数据说明、版本管理和主管审核发布。
 
-当前版本：1.1.0。正式飞书环境已部署到 Windows 宿主机，访问 http://192.168.110.54:8080 。原 Docker 容器已停止，原数据卷保留。当前启停、日志和备份操作见 [宿主机部署说明](docs/host-deployment.md)。
+当前版本：1.1.0。Windows Docker 部署地址为 http://192.168.110.25:8001，容器名为 `prt-datahub-production`。更新及维护见 [Windows Docker 更新手册](docs/windows-docker-guide.md)，每日全量备份直接写入 `D:\PRT-backups\daily\latest`。
 
 - [第一版产品需求文档](docs/requirements-v1.md)：业务范围、角色权限、流程、数据对象、页面及验收标准。
 - [操作手册](docs/user-manual.md)：各角色上手、需求与 Demo 绑定、AI 说明、审核发布、飞书通知、管理维护和部署验收。
 - [Windows Docker 简明部署手册](docs/windows-docker-guide.md)：在 `J:\PRT-demo-hub-test` 编译部署、迁移旧容器数据、验证和维护。
+- [每日完整本地备份](docs/daily-backup.md)：每天北京时间 24:00 将全部数据库、上传文件、源码和运行配置备份到 D 盘，仅保留校验成功的 `latest`。
 - [DeepSeek 官方 Pro 配置](docs/deepseek-configuration.md)：数据说明和智能检索统一使用 `deepseek-v4-pro`，包含旧配置迁移及双功能自检。
 - [现有 Windows 服务更新步骤](docs/host-deployment.md#版本更新)：备份、同步代码、构建、重启、检查和回退。
 - [Windows 新目录全新部署](docs/fresh-windows-deployment.md)：针对 `192.168.110.25:8081` 的独立目录、空数据、飞书配置和管理员初始化步骤。
@@ -42,6 +43,8 @@ npm run dev
 ```
 
 打开 http://127.0.0.1:5173，选择演示身份即可体验。使用 `.preview-data/` 保存演示数据；正式数据目录与演示目录隔离。
+
+登录页以全屏森林动画为主体，固定按“完整视频 → 松果落地至静止 → 松果固定、草叶轻摆循环”播放，登录入口以半透明纸张浮层柔和渐入。查看动画可打开 http://127.0.0.1:5173/?intro=1（已登录时先退出，刷新可从头查看）；详细说明见[登录动画与本地预览](docs/login-animation.md)。
 
 ## 已实现
 
@@ -106,4 +109,4 @@ compose.production.yaml  企业正式环境：独立配置和数据卷
 
 短时签名请求只允许回到指定中心，返回的登录码 60 秒有效、只能使用一次且必须携带匹配的 PKCE verifier 兑换。停用、删除或没有平台角色的账号不能登录中心。中心首次创建用户时，将本平台 `admin` 初始化为中心管理员，其他已授权角色初始化为成员；后续中心自身的角色与启停仍由中心管理员管理。授权码和会话不包含飞书 App Secret 或飞书访问令牌。
 
-内置 DeepSeek 运维支持独立对话开发、隔离源码修改与测试，以及部署当天北京时间午夜备份、提交到 `feature/deepseek`。配置及 Windows 启用命令见 [运维手册](docs/deepseek-ops.md)。
+内置 DeepSeek 运维支持独立对话开发、隔离源码修改与测试，以及部署当天北京时间午夜提交核心源码到 `feature/deepseek`。全量本地备份独立执行，每天北京时间午夜更新 `latest`。配置及 Windows 启用命令见 [运维手册](docs/deepseek-ops.md)。

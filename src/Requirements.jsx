@@ -363,7 +363,7 @@ function RequirementWikiStatus({ requirement }) {
   return <div className="requirement-calendar requirement-wiki">
     <strong><FileText size={15}/>飞书协作文档</strong>
     <p role="status">{({ not_created: '此历史需求尚未创建飞书文档，可点击下方按钮创建。', pending: '正在创建或同步飞书文档、Demo 内容及关联人员编辑权限，失败时自动重试。', synced: '文档已就绪，关联 Demo 上传文件或保存说明后会自动同步。', failed: '飞书文档同步失败，请检查知识库和文档权限后重试。' })[wiki?.status] || '等待同步'}</p>
-    <p>平台维护“需求简述”“需求文档”和“Demo 内容（平台自动同步）”区域，人工补充请写在其他区块。Demo 上传文件并保存说明后，自动同步数据概述、数据格式、数据量级、成本预估、难度说明和注意事项；文件仍在平台，查看和下载需要相应权限。</p>
+    <p>平台维护“需求简述”“需求文档”和“Demo 内容（平台自动同步）”区域，人工补充请写在其他区块。Demo 上传文件并保存说明后，自动同步数据说明、数据量级、成本预估和注意事项；仅“大模型”分类同步模型难度、任务格式及 Rollout 评测信息。文件仍在平台，查看和下载需要相应权限。</p>
     {(wiki?.error || error) && <p className="requirement-calendar-error">{error || wiki.error}</p>}
     <div>{wiki?.url && <a className="button small" href={wiki.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={14}/>打开飞书文档</a>}{requirement.canSyncWiki && wiki?.status !== 'pending' && <button type="button" className="button small" disabled={busy} onClick={sync}>{busy ? '提交中…' : wiki?.status === 'not_created' ? '创建飞书文档' : wiki?.status === 'failed' ? '重试文档同步' : '同步文档与人员'}</button>}</div>
   </div>;

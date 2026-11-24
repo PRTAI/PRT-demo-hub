@@ -47,7 +47,7 @@ try {
         throw 'Missing scripts/repair-docker-build.ps1. Sync the complete scripts directory before updating.'
     }
     & $prtRepairScript -ProjectDirectory (Get-Location).Path
-    foreach ($prtFile in @('.env', '.gitignore', '.dockerignore', 'Dockerfile', 'Dockerfile.ops', 'README.md', 'index.html', 'vite.config.mjs', 'package.json', 'package-lock.json', 'compose.production.yaml', 'compose.keep-data.yaml', 'scripts/backup.mjs')) {
+    foreach ($prtFile in @('.env', '.gitignore', '.dockerignore', 'Dockerfile', 'Dockerfile.ops', 'README.md', 'index.html', 'vite.config.mjs', 'package.json', 'package-lock.json', 'compose.production.yaml', 'scripts/backup.mjs')) {
         if (-not (Test-Path -LiteralPath $prtFile -PathType Leaf)) {
             throw "Required file is missing: $prtFile"
         }
@@ -58,15 +58,20 @@ try {
     Get-Command docker -ErrorAction Stop | Out-Null
     Write-Host '[1/6] Checking Docker, Compose and existing data volumes...'
     Invoke-PrtDocker -DockerArguments @('version')
-    Invoke-PrtDocker -DockerArguments @('volume', 'inspect', $prtDataVolume, $prtBackupVolume)
     $prtInspection = & docker inspect $prtContainer
     if ($LASTEXITCODE -ne 0) { throw 'Existing container not found. This script updates an existing deployment only.' }
     $prtExisting = @($prtInspection | ConvertFrom-Json)[0]
+    $prtDataMounts = @($prtExisting.Mounts | Where-Object { $_.Destination -eq '/app/data' })
+    if ($prtDataMounts.Count -ne 1) { throw 'Cannot identify the existing application data mount.' }
+    $prtUsesRecovery = $prtDataMounts[0].Type -eq 'bind'
+    $prtDataCompose = if ($prtUsesRecovery) { 'compose.recovery.yaml' } else { 'compose.keep-data.yaml' }
+    if (-not (Test-Path -LiteralPath $prtDataCompose -PathType Leaf)) { throw "Missing data mount configuration: $prtDataCompose" }
+    if (-not $prtUsesRecovery) { Invoke-PrtDocker -DockerArguments @('volume', 'inspect', $prtDataVolume, $prtBackupVolume) }
     $prtProjectLabel = $prtExisting.Config.Labels.PSObject.Properties['com.docker.compose.project']
     if ($null -eq $prtProjectLabel -or [string]::IsNullOrWhiteSpace([string]$prtProjectLabel.Value)) {
         throw 'Existing container has no Compose project label. Check its deployment before updating.'
     }
-    $prtCompose = @('compose', '-p', [string]$prtProjectLabel.Value, '-f', 'compose.production.yaml', '-f', 'compose.keep-data.yaml')
+    $prtCompose = @('compose', '-p', [string]$prtProjectLabel.Value, '-f', 'compose.production.yaml')
     $prtConfigLabel = $prtExisting.Config.Labels.PSObject.Properties['com.docker.compose.project.config_files']
     $prtHadOps = $null -ne $prtConfigLabel -and ([string]$prtConfigLabel.Value).Contains('compose.ops.yaml')
     if ($EnableOps -or $prtHadOps) {
@@ -76,14 +81,28 @@ try {
         $prtCompose += @('-f', 'compose.ops.yaml')
         $prtServices += 'ops-worker'
     }
+    $prtCompose += @('-f', $prtDataCompose)
+    if (-not (Test-Path -LiteralPath 'compose.daily-backup.yaml' -PathType Leaf)) { throw 'Missing compose.daily-backup.yaml. Sync the latest deployment files.' }
+    $prtCompose += @('-f', 'compose.daily-backup.yaml')
     Write-Host ('Using existing Compose project: ' + $prtProjectLabel.Value)
     Invoke-PrtDocker -DockerArguments ($prtCompose + @('config', '--quiet'))
     if (-not $prtExisting.State.Running) { throw 'Start the existing container before creating the backup.' }
+    # Capture resolved config privately; it contains credentials and must not be printed.
+    $prtResolvedJson = & docker @prtCompose config --format json
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve deployment mounts.' }
+    $prtResolved = $prtResolvedJson | ConvertFrom-Json
     foreach ($prtMount in @(
         @{ Destination = '/app/data'; Name = $prtDataVolume },
         @{ Destination = '/app/backups'; Name = $prtBackupVolume }
     )) {
-        $prtMatch = @($prtExisting.Mounts | Where-Object { $_.Destination -eq $prtMount.Destination -and $_.Type -eq 'volume' -and $_.Name -eq $prtMount.Name })
+        if ($prtUsesRecovery) {
+            $prtExpected = @($prtResolved.services.app.volumes | Where-Object { $_.target -eq $prtMount.Destination -and $_.type -eq 'bind' })
+            if ($prtExpected.Count -ne 1) { throw "Recovery configuration must retain a host bind for $($prtMount.Destination)." }
+            $prtExpectedSource = [IO.Path]::GetFullPath([string]$prtExpected[0].source).TrimEnd('\', '/')
+            $prtMatch = @($prtExisting.Mounts | Where-Object { $_.Destination -eq $prtMount.Destination -and $_.Type -eq 'bind' -and [IO.Path]::GetFullPath([string]$_.Source).TrimEnd('\', '/') -eq $prtExpectedSource })
+        } else {
+            $prtMatch = @($prtExisting.Mounts | Where-Object { $_.Destination -eq $prtMount.Destination -and $_.Type -eq 'volume' -and $_.Name -eq $prtMount.Name })
+        }
         if ($prtMatch.Count -ne 1) { throw "Unexpected existing mount: $($prtMount.Destination). Check the deployment before updating." }
     }
 

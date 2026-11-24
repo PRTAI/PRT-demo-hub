@@ -30,6 +30,7 @@ COPY src /opt/source/src
 COPY tests /opt/source/tests
 COPY docs /opt/source/docs
 COPY public /opt/source/public
+COPY --from=build /app/dist /opt/source/dist
 ENV OPS_SOURCE_DIR=/opt/source
 USER node
 VOLUME ["/app/data", "/app/backups"]

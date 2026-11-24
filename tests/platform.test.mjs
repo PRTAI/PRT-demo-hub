@@ -575,18 +575,22 @@ test('RAG stream emits visible agent retrieval stages before its result', async 
 
 test('description agent runs in background, preserves the draft and queues requester notification', async t => {
   let prompt = '';
-  const markdown = '# 数据概述\n\n本数据包含任务定义和运行材料。\n\n# 数据格式\n\n```text\n单个任务/\n├── instruction.md  # 任务说明\n└── data/            # 输入材料\n```\n\ninstruction.md 保存任务要求。';
-  const ctx = await fixture(t, { descriptionAgentKey: 'independent-test-key', descriptionAgentUrl: 'https://agent.test', descriptionAgentModel: 'claude-test', descriptionAgentRunner: async input => { prompt = input.prompt; await new Promise(resolve => setTimeout(resolve, 20)); return { markdown }; } });
+  const markdown = '# 模型难度\n\n模型在多步工具调用后容易丢失任务状态，尚未通过验证。\n\n# 数据格式\n\n```text\n单个任务/\n├── instruction.md  # 任务说明\n└── data/            # 输入材料\n```\n\ninstruction.md 保存任务要求。';
+  const evaluation = { taskFormat: 'trajectory', rolloutModel: 'EvaluationModel-not-description-model', rolloutCount: 5, passRate: 0 };
+  const ctx = await fixture(t, { descriptionAgentKey: 'independent-test-key', descriptionAgentUrl: 'https://agent.test', descriptionAgentModel: 'claude-test', descriptionAgentRunner: async input => { prompt = input.prompt; await new Promise(resolve => setTimeout(resolve, 20)); return { markdown, ...evaluation, difficulty: '模型需要在多步工具调用后保持状态' }; } });
   const owner = await ctx.login('preview-employee'), demo = await create(owner);
   await owner.upload(demo.versionId, 0, 'preview.zip', fs.readFileSync(new URL('./fixtures/preview.zip', import.meta.url))).expect(201);
-  const queued = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1 }).expect(202);
+  const queued = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1, category: '大模型', evaluation }).expect(202);
   assert.ok(['pending','running'].includes(queued.body.status));
   await owner.send('put', `/versions/${demo.versionId}`, { revision: 1, description: { ...description, notes: '生成期间继续编辑' } }).expect(200);
   let job; for (let i=0;i<50;i++) { job=(await owner.get(`/description/jobs/${queued.body.id}`).expect(200)).body; if (['complete','failed'].includes(job.status)) break; await new Promise(resolve=>setTimeout(resolve,10)); }
   assert.equal(job.status, 'complete'); assert.equal(job.result.markdown, markdown); assert.match(prompt, /folder\/code\.py/);
+  for (const [key, value] of Object.entries(evaluation)) assert.equal(job.result[key], value);
+  assert.ok(prompt.includes('"rolloutModel":"EvaluationModel-not-description-model"')); assert.ok(prompt.includes('"passRate":0'));
   const latest = await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200); assert.equal(latest.body.id, queued.body.id);
   const unchanged = await detail(owner, demo.id); assert.equal(unchanged.latest.description.content, description.content);
   assert.equal(unchanged.latest.description.notes, '生成期间继续编辑');
+  assert.equal(unchanged.latest.description.rolloutModel, ''); assert.equal(unchanged.latest.description.passRate, null);
   assert.ok(ctx.notifications.list().some(item => item.kind === 'description_generated' && item.recipient_id === 'preview-employee'));
   await owner.send('post', `/description/jobs/${queued.body.id}/review`, { action: 'accepted' }).expect(200);
   await owner.get(`/versions/${demo.versionId}/description/jobs/latest`).expect(200).then(response => assert.equal(response.body, null));
@@ -2204,4 +2208,101 @@ test('requirement deletion enforces CSRF, live roles and revisions, and rolls ba
   assert.equal((await detail(employee, demo.id)).requirements[0].id, requirement.id);
   assert.equal(ctx.store.one("SELECT COUNT(*) AS n FROM events WHERE action='requirement_delete'").n, 0);
   await pm.send('delete', endpoint, { revision: 0 }).expect(200);
+});
+
+test('model evaluation fields persist through edits, business views, submissions, publication and version copies', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager'), business = await ctx.login('preview-business');
+  const settings = JSON.parse(ctx.store.one('SELECT value FROM settings WHERE id=1').value);
+  ctx.store.run('UPDATE settings SET value=? WHERE id=1', JSON.stringify({ ...settings, categories: [...settings.categories, '大模型'] }));
+  const evaluation = { taskFormat: 'harbor_task', rolloutModel: 'EvaluationModel-202611', rolloutCount: 5, passRate: 25.5 };
+  const demo = (await employee.send('post', '/assets', { description: { ...description, category: '大模型', ...evaluation, difficulty: '模型在长程规划及工具执行后的状态验证环节容易失败。' } }).expect(201)).body;
+  await employee.upload(demo.versionId, 0).expect(201);
+  let current = await detail(employee, demo.id);
+  for (const [key, value] of Object.entries(evaluation)) assert.equal(current.latest.description[key], value);
+  await employee.send('put', `/versions/${demo.versionId}`, { revision: 1, description: { ...current.latest.description, passRate: 0 } }).expect(200);
+  current = await detail(employee, demo.id);
+  const publicView = (await business.get(`/assets/${demo.id}`).expect(200)).body;
+  for (const key of Object.keys(evaluation)) assert.equal(publicView.latest.description[key], current.latest.description[key]);
+  assert.equal(publicView.latest.description.costEstimate, undefined);
+  assert.ok((await business.send('post', '/search/rag', { question: evaluation.rolloutModel }).expect(200)).body.sources.some(asset => asset.id === demo.id));
+  assert.ok((await employee.send('post', '/search/rag', { question: 'Harbor Task' }).expect(200)).body.sources.some(asset => asset.id === demo.id));
+  assert.equal((await action(employee, demo.versionId, 2, 'submit')).status, 200);
+  let saved = await detail(employee, demo.id);
+  assert.equal(saved.submissions[0].snapshot.description.passRate, 0);
+  assert.equal(saved.submissions[0].snapshot.description.rolloutCount, 5);
+  assert.equal((await action(manager, demo.versionId, 3, 'publish')).status, 200);
+  saved = await detail(employee, demo.id);
+  assert.equal(saved.events.find(event => event.action === 'publish').detail.snapshot.description.passRate, 0);
+  const next = (await employee.send('post', `/assets/${demo.id}/versions`, { revision: saved.revision, baseVersionId: demo.versionId }).expect(201)).body;
+  const copied = (await detail(employee, demo.id)).versions.find(version => version.id === next.versionId).description;
+  assert.equal(copied.rolloutCount, 5); assert.equal(copied.passRate, 0); assert.equal(copied.taskFormat, 'harbor_task');
+});
+
+test('evaluation values validate before saving or generating and legacy descriptions remain editable with blank metrics', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), demo = await create(employee);
+  const endpoint = `/versions/${demo.versionId}`, before = ctx.store.one('SELECT * FROM versions WHERE id=?', demo.versionId);
+  for (const invalid of [{ taskFormat: 'other' }, { rolloutModel: 'x'.repeat(201) }, { rolloutCount: 0 }, { rolloutCount: -1 }, { rolloutCount: 1.5 }, { rolloutCount: Number.MAX_SAFE_INTEGER + 1 }, { rolloutCount: '5' }, { passRate: -0.1 }, { passRate: 100.1 }, { passRate: '25%' }]) {
+    await employee.send('post', '/assets', { description: { ...description, ...invalid } }).expect(400);
+    await employee.send('put', endpoint, { revision: 0, description: { ...description, ...invalid } }).expect(400);
+    await employee.send('post', endpoint + '/description/generate', { revision: 0, evaluation: invalid }).expect(400);
+  }
+  assert.deepEqual(ctx.store.one('SELECT * FROM versions WHERE id=?', demo.versionId), before);
+  assert.equal(ctx.store.one('SELECT COUNT(*) AS n FROM description_jobs').n, 0);
+  // Simulate a pre-upgrade description with none of the four new fields.
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify(description), demo.versionId);
+  await employee.send('put', endpoint, { revision: 0, description }).expect(200);
+  let current = await detail(employee, demo.id);
+  assert.equal(current.latest.description.taskFormat, ''); assert.equal(current.latest.description.rolloutModel, '');
+  assert.equal(current.latest.description.rolloutCount, null); assert.equal(current.latest.description.passRate, null);
+  await employee.upload(demo.versionId, 1).expect(201);
+  assert.equal((await action(employee, demo.versionId, 2, 'submit')).status, 200);
+});
+
+test('non-model Demos submit and publish without difficulty while model Demos still require it', async t => {
+  const ctx = await fixture(t), employee = await ctx.login('preview-employee'), manager = await ctx.login('preview-manager');
+  const settings = JSON.parse(ctx.store.one('SELECT value FROM settings WHERE id=1').value);
+  ctx.store.run('UPDATE settings SET value=? WHERE id=1', JSON.stringify({ ...settings, categories: [...settings.categories, '大模型'] }));
+  const ordinary = (await employee.send('post', '/assets', { description: { ...description, difficulty: '' } }).expect(201)).body;
+  await employee.upload(ordinary.versionId, 0).expect(201);
+  assert.equal((await action(employee, ordinary.versionId, 1, 'submit')).status, 200);
+  assert.equal((await action(manager, ordinary.versionId, 2, 'publish')).status, 200);
+  const model = (await employee.send('post', '/assets', { description: { ...description, category: '大模型', difficulty: '' } }).expect(201)).body;
+  await employee.upload(model.versionId, 0).expect(201);
+  const rejected = await action(employee, model.versionId, 1, 'submit');
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.body.error, /请填写模型难度说明/);
+  assert.equal((await action(manager, model.versionId, 1, 'publish')).status, 400);
+  await employee.send('put', `/versions/${model.versionId}`, { revision: 1, description: { ...description, category: '大模型', difficulty: '模型需要保持多步工具调用的状态一致性' } }).expect(200);
+  assert.equal((await action(employee, model.versionId, 2, 'submit')).status, 200);
+  assert.equal((await action(manager, model.versionId, 3, 'publish')).status, 200);
+});
+
+test('generation uses saved or current form category and non-model jobs ignore model context and output fields', async t => {
+  const prompts = [];
+  const ctx = await fixture(t, { descriptionAgentKey: 'test-key', descriptionAgentUrl: 'https://agent.test', descriptionAgentModel: 'test-model', descriptionAgentRunner: async ({ prompt }) => {
+    prompts.push(prompt);
+    return { markdown: description.content, difficulty: '生成的模型难度', taskFormat: 'trajectory', rolloutModel: 'GeneratedModel', rolloutCount: 5, passRate: 0 };
+  } });
+  const owner = await ctx.login('preview-employee');
+  for (const [category, override, model] of [['大模型', undefined, true], ['大模型', '通用数据', false], ['通用数据', undefined, false]]) {
+    const demo = (await owner.send('post', '/assets', { description: { ...description, category, rolloutModel: 'SavedContextModel' } }).expect(201)).body;
+    await owner.upload(demo.versionId, 0, 'sample.csv', Buffer.from('id,value\n1,2')).expect(201);
+    const queued = await owner.send('post', `/versions/${demo.versionId}/description/generate`, { revision: 1, ...(override ? { category: override } : {}), evaluation: { rolloutModel: 'UnsavedContextModel' } }).expect(202);
+    let job;
+    for (let i = 0; i < 50; i++) { job = (await owner.get(`/description/jobs/${queued.body.id}`).expect(200)).body; if (['complete', 'failed'].includes(job.status)) break; await new Promise(resolve => setTimeout(resolve, 10)); }
+    assert.equal(job.status, 'complete');
+    const prompt = prompts.at(-1);
+    if (model) { assert.match(prompt, /# 模型难度/); assert.match(prompt, /UnsavedContextModel/); assert.equal(job.result.passRate, 0); }
+    else { assert.match(prompt, /# 数据概述/); assert.doesNotMatch(prompt, /# 模型难度|SavedContextModel|UnsavedContextModel/); assert.deepEqual(job.result, { markdown: description.content }); }
+  }
+});
+
+test('search ignores retained model metrics when a Demo belongs to a non-model category', async t => {
+  const ctx = await fixture(t), owner = await ctx.login('preview-employee');
+  const demo = (await owner.send('post', '/assets', { description: { ...description, rolloutModel: 'HiddenRolloutOnly123', difficulty: 'HiddenDifficultyOnly123' } }).expect(201)).body;
+  await owner.upload(demo.versionId, 0).expect(201);
+  for (const question of ['HiddenRolloutOnly123', 'HiddenDifficultyOnly123']) {
+    const response = await owner.send('post', '/search/rag', { question }).expect(200);
+    assert.ok(!response.body.sources.some(asset => asset.id === demo.id));
+  }
 });

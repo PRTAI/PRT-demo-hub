@@ -27,10 +27,13 @@ import { createPersonalRequirementDocuments } from './requirement-personal-docum
 import { createRequirementAccess } from './requirement-access.mjs';
 import { createOpsMaintenance } from './ops-maintenance.mjs';
 import { createOpsAgent } from './ops-agent.mjs';
+import { createDailyBackupScheduler } from './daily-backup-scheduler.mjs';
+import { evaluationSchema, modelDifficultySchema } from './description-evaluation.mjs';
+import { isModelData } from '../shared/demo-evaluation.mjs';
 
 const roles = ['employee', 'supervisor', 'pm', 'business', 'admin', 'ops'];
 const working = ['draft', 'pending', 'returned'];
-const descriptionSchema = z.object({ title: z.string().max(120).default(''), summary: z.string().max(500).default(''), category: z.string().max(80).default(''), tags: z.array(z.string().max(30)).max(12).default([]), content: z.string().max(20000).default(''), usage: z.string().max(20000).default(''), costEstimate: z.string().trim().max(5000).default(''), dataVolume: z.string().trim().max(5000).default(''), difficulty: z.string().max(5000).default(''), notes: z.string().max(10000).default(''), changes: z.string().max(5000).default(''), schemaVersion: z.literal(1).default(1) });
+const descriptionSchema = z.object({ title: z.string().max(120).default(''), summary: z.string().max(500).default(''), category: z.string().max(80).default(''), tags: z.array(z.string().max(30)).max(12).default([]), content: z.string().max(20000).default(''), usage: z.string().max(20000).default(''), costEstimate: z.string().trim().max(5000).default(''), dataVolume: z.string().trim().max(5000).default(''), difficulty: modelDifficultySchema, notes: z.string().max(10000).default(''), changes: z.string().max(5000).default(''), schemaVersion: z.literal(1).default(1), ...evaluationSchema.shape });
 const revisionSchema = z.object({ revision: z.number().int().nonnegative() });
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
@@ -47,7 +50,13 @@ export function createApp(options = {}) {
   const mode = one("SELECT value FROM metadata WHERE key='mode'");
   if (mode && mode.value !== (config.demoMode ? 'preview' : 'production')) { store.db.close(); throw new Error('Preview and production must use separate data directories'); }
   run("INSERT OR IGNORE INTO metadata VALUES('mode',?)", config.demoMode ? 'preview' : 'production');
-  const opsMaintenance = createOpsMaintenance(store, config);
+  const dailyBackup = createDailyBackupScheduler(store, config);
+  const opsMaintenance = createOpsMaintenance(store, { ...config, ...(!config.opsBackup && !config.demoMode && config.dailyBackupEnabled !== false ? { opsBackupDir: dailyBackup.status().directory, opsBackup: async () => {
+    await dailyBackup.tick();
+    const state = dailyBackup.status();
+    if (state.status !== 'complete' || state.stale) throw new Error('每日完整备份尚未成功，暂缓代码归档');
+    return state.lastSuccess;
+  } } : {}) });
   if (config.demoMode) seedPreview(store);
   if (config.demoMode && (config.harnessSharedSecret || process.env.HARNESS_SHARED_SECRET)) seedHarnessPreview(store);
   const notifications = createNotifications(store, config);
@@ -76,7 +85,7 @@ export function createApp(options = {}) {
   const editAccess = (user, asset) => own(user, asset) || manage(user, asset) || permission(user, asset) === 'upload';
   const visible = (user, asset) => has(user, 'pm') || has(user, 'business') || own(user, asset) || manage(user, asset) || !!permission(user, asset) || requirementAccess.asset(user, asset.id);
   const businessRestricted = (user, asset) => has(user, 'business') && !has(user, 'pm') && !own(user, asset) && !manage(user, asset) && !requirementAccess.asset(user, asset.id);
-  const descriptionFor = (user, asset, description) => businessRestricted(user, asset) ? (({ title, summary, category, tags, content, dataVolume, difficulty, schemaVersion }) => ({ title, summary, category, tags, content, dataVolume, difficulty, schemaVersion })) (description) : description;
+  const descriptionFor = (user, asset, description) => businessRestricted(user, asset) ? (({ title, summary, category, tags, content, dataVolume, difficulty, taskFormat, rolloutModel, rolloutCount, passRate, schemaVersion }) => ({ title, summary, category, tags, content, dataVolume, difficulty, taskFormat, rolloutModel, rolloutCount, passRate, schemaVersion })) (description) : description;
   const assetFor = (user, id) => { const asset = one('SELECT * FROM assets WHERE id=?', id); if (!asset || !visible(user, asset)) fail(404, 'Demo 不存在或无访问权限'); return asset; };
   const versionFor = (user, id) => { const version = one('SELECT * FROM versions WHERE id=?', id); if (!version) fail(404, '版本不存在'); return { version, asset: assetFor(user, version.asset_id) }; };
   const checkRevision = (version, revision) => { if (!Number.isInteger(revision) || version.revision !== revision) fail(409, '内容已被更新，请重新加载后再操作'); };
@@ -107,7 +116,10 @@ export function createApp(options = {}) {
   app.get('/api/reviewers', (req,res) => res.json(all('SELECT * FROM users WHERE enabled=1').filter(user=>has(user,'supervisor')).map(publicUser)));
   app.get('/api/notification-candidates', (req,res) => res.json(all("SELECT * FROM users WHERE enabled=1 AND account_type='human' ORDER BY name").filter(user=>parse(user.roles,[]).length).map(publicUser)));
   app.post('/api/versions/:id/description/generate', (req, res) => {
-    const { version, asset } = versionFor(req.user, req.params.id); editable(req.user, asset, version); checkRevision(version, revisionSchema.parse(req.body).revision);
+    const input = revisionSchema.extend({ category: z.string().max(80).optional(), evaluation: evaluationSchema.extend({ difficulty: modelDifficultySchema }).optional() }).parse(req.body);
+    const { version, asset } = versionFor(req.user, req.params.id); editable(req.user, asset, version); checkRevision(version, input.revision);
+    const description = parse(version.description), category = input.category ?? description.category ?? '';
+    const evaluation = isModelData(category) ? input.evaluation || evaluationSchema.extend({ difficulty: modelDifficultySchema }).parse(description) : {};
     const files = filesFor(version.id); if (!files.length) fail(400, '请先上传并保存至少一个 Demo 文件');
     const current = one("SELECT * FROM description_jobs WHERE version_id=? AND requester_id=? AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1", version.id, req.user.id);
     if (current) return res.status(202).json({ id: current.id, status: current.status });
@@ -116,7 +128,7 @@ export function createApp(options = {}) {
     setImmediate(async () => {
       try {
         run("UPDATE description_jobs SET status='running' WHERE id=? AND status='pending'", job.id);
-        const result = await descriptionAgent(files);
+        const result = await descriptionAgent(files, { ...evaluation, category });
         run("UPDATE description_jobs SET status='complete',result=?,completed_at=? WHERE id=?", JSON.stringify(result), now(), job.id);
         const requester = one('SELECT * FROM users WHERE id=?', job.requesterId), latestVersion = one('SELECT * FROM versions WHERE id=?', job.versionId);
         if (requester && latestVersion) notifications.enqueueDirect('description_generated', latestVersion, requester, Date.now(), { jobId: job.id });
@@ -211,7 +223,7 @@ export function createApp(options = {}) {
   });
   const validatePublish = version => {
     const d = parse(version.description), conf = settings();
-    for (const [key, label] of [['title', '名称'], ['summary', '简介'], ['category', '分类'], ['content', '数据说明'], ['costEstimate', '成本预估（以两周时间参考）'], ['dataVolume', '数据量级（以两周产量评估）'], ['difficulty', '难度说明']]) if (!d[key]?.trim()) fail(400, `请填写${label}`);
+    for (const [key, label] of [['title', '名称'], ['summary', '简介'], ['category', '分类'], ['content', '数据说明'], ['costEstimate', '成本预估（以两周时间参考）'], ['dataVolume', '数据量级（以两周产量评估）'], ...(isModelData(d.category) ? [['difficulty', '模型难度说明']] : [])]) if (!d[key]?.trim()) fail(400, `请填写${label}`);
     if (!conf.categories.includes(d.category)) fail(400, '请选择当前有效的业务分类');
     if (version.number > 1 && !d.changes?.trim()) fail(400, '请填写本次变更说明');
     const files = filesFor(version.id);
@@ -474,7 +486,7 @@ export function createApp(options = {}) {
     res.status(202).json(task);
   });
   app.get('/api/admin/health', admin, (req, res) => {
-    const disk = fs.statfsSync(store.root); res.json({ freeBytes: disk.bavail * disk.bsize, totalBytes: disk.blocks * disk.bsize, usedFileBytes: one('SELECT COALESCE(SUM(size),0) AS total FROM files').total, backup: parse(one("SELECT value FROM metadata WHERE key='last_backup'")?.value, null), backupTask,
+    const disk = fs.statfsSync(store.root); res.json({ freeBytes: disk.bavail * disk.bsize, totalBytes: disk.blocks * disk.bsize, usedFileBytes: one('SELECT COALESCE(SUM(size),0) AS total FROM files').total, backup: parse(one("SELECT value FROM metadata WHERE key='last_backup'")?.value, null), backupTask, dailyBackup: dailyBackup.status(),
       version: '1.1.0', uptime: Math.floor(process.uptime()), mode: config.demoMode ? 'preview' : 'production',
       feishu: { appId: !!config.appId, appSecret: !!config.appSecret, tenantKey: !!config.tenantKey, callback: config.origin + '/api/auth/callback' },
       descriptionAgent: { key: !!config.descriptionAgentKey, url: !!config.descriptionAgentUrl, model: config.descriptionAgentModel || '', transport: config.descriptionAgentTransport, apiFormat: config.descriptionAgentApiFormat } });
@@ -491,5 +503,5 @@ export function createApp(options = {}) {
     console.error(`[${now()}] ${req.method} request failed`, err.code || err.name, err.message);
     res.status(500).json({ error: '操作失败，请稍后重试；如持续出现请联系管理员' });
   });
-  return { app, store, config, notifications, requirementCalendar, requirementWiki, personalRequirementDocuments, requirementExports: requirements.exports, opsMaintenance, opsAgent };
+  return { app, store, config, notifications, requirementCalendar, requirementWiki, personalRequirementDocuments, requirementExports: requirements.exports, opsMaintenance, opsAgent, dailyBackup };
 }

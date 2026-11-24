@@ -7,6 +7,7 @@ import { UsersPage, SettingsPage } from './Admin';
 import { RequirementsPage } from './Requirements';
 import { OpsPage } from './Ops';
 import { routeToIntranet } from './network-routing.mjs';
+import { Login } from './Login';
 
 export default function App() {
   const [auth, setAuth] = useState(null), [error, setError] = useState(''), [assets, setAssets] = useState([]), [config, setConfig] = useState(null), [loading, setLoading] = useState(true);
@@ -119,13 +120,3 @@ function RagPage({ question, setQuestion, result, stages, busy, error, onSearch,
 }
 function Nav({ active, icon: Icon, children, onClick }) { return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}><Icon size={19}/>{children}</button>; }
 function categoryColor(category) { return ({ 金融服务: 'violet', 工业制造: 'blue', 医疗健康: 'rose', 通用数据: 'amber' })[category] || 'green'; }
-function Login({ auth, onLogin }) {
-  const [accounts, setAccounts] = useState([]), [selected, setSelected] = useState('preview-manager'), [busy, setBusy] = useState(false), [error, setError] = useState(new URLSearchParams(location.search).get('authError') || '');
-  useEffect(() => { if (auth.demoMode) api('/auth/demo-users').then(setAccounts).catch(e => setError(e.message)); }, []);
-  async function login() { setBusy(true); try { await api('/auth/demo-login', { method: 'POST', body: { userId: selected } }); history.replaceState(null, '', '/'); await onLogin(); } catch (e) { setError(e.message); } finally { setBusy(false); } }
-  const requirementId = new URLSearchParams(location.search).get('requirement');
-  const demoId = new URLSearchParams(location.search).get('demo');
-  const loginQuery = new URLSearchParams({ ...(requirementId ? { requirement: requirementId } : {}), ...(demoId ? { demo: demoId } : {}) });
-  const loginUrl = '/api/auth/feishu' + (loginQuery.size ? '?' + loginQuery : '');
-  return <div className="login-page"><div className="login-story"><a className="brand"><span className="brand-icon"><Layers3 size={25}/></span><span><strong>PRT / DataHub</strong><small>企业内部数据样例管理平台</small></span></a><div className="login-copy"><div className="eyebrow">A SHARED SPACE FOR YOUR DATA</div><h1>让好数据，<br/>成为团队的共同资产<span>。</span></h1><p>从一次上传，到每一次迭代。<br/>在同一个空间，管理样例、规范说明、协作发布。</p><div className="login-features"><span><FolderOpen size={18}/>集中管理</span><span><Layers3 size={18}/>版本可溯</span><span><ShieldCheck size={18}/>权限可控</span></div></div><small>PRT DataHub · 企业内部工作空间</small></div><div className="login-form"><div className="login-box"><span className="login-icon"><Layers3 size={28}/></span><h2>欢迎回到数据工作台</h2><p>使用企业身份，连接你的数据与团队。</p><ErrorBox>{error}</ErrorBox><a className={`button primary feishu-button ${!auth.feishuConfigured ? 'unconfigured' : ''}`} href={loginUrl}><ArrowUpRight size={20}/>使用飞书账号登录<ArrowRight size={18}/></a>{!auth.feishuConfigured && <p className="login-note">飞书登录将在管理员完成应用配置后启用。</p>}{auth.demoMode && <div className="demo-login"><div><span className="preview-label">功能体验</span><small>仅使用独立演示数据</small></div><label htmlFor="preview-user">选择身份体验完整流程</label><select id="preview-user" value={selected} onChange={e => setSelected(e.target.value)}>{accounts.map(u => <option key={u.id} value={u.id}>{u.name} · {u.roles.map(r => roleLabels[r]).join(' / ') || '待授权'}</option>)}</select><button className="button" onClick={login} disabled={busy}>{busy ? '正在进入…' : '进入演示工作台'}<ArrowRight size={17}/></button></div>}<div className="login-privacy"><ShieldCheck size={14}/>仅限企业内部人员访问</div></div></div></div>;
-}

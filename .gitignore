@@ -33,3 +33,13 @@ Desktop.ini
 *.swo
 *~
 *.tsbuildinfo
+
+# Machine-specific deployment overrides and disaster-recovery artifacts.
+/compose.recovery.yaml
+*.vhd
+*.vhdx
+*.avhdx
+/PRT-data-rescue*/
+/PRT-data-restored*/
+/PRT-recovered-files*/
+/PRT-backups/

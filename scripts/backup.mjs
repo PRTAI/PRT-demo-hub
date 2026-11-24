@@ -4,16 +4,19 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-export async function createBackup(source, destination) {
+export async function createBackup(source, destination, { includeUnregisteredFiles = false } = {}) {
   const root = path.resolve(source), target = path.resolve(destination);
   if (target === root || target.startsWith(root + path.sep)) throw new Error('Backup must be outside the data directory');
   if (fs.existsSync(target)) throw new Error('Backup destination already exists; choose a new directory');
   fs.mkdirSync(path.join(target, 'files'), { recursive: true });
   const live = new DatabaseSync(path.join(root, 'platform.sqlite'));
+  live.exec('PRAGMA busy_timeout=5000');
   let snapshot;
   try {
     await backup(live, path.join(target, 'platform.sqlite'));
     snapshot = new DatabaseSync(path.join(target, 'platform.sqlite'));
+    if (snapshot.prepare('PRAGMA integrity_check').get().integrity_check !== 'ok') throw new Error('Database integrity check failed');
+    if (snapshot.prepare('PRAGMA foreign_key_check').get()) throw new Error('Database foreign key check failed');
     snapshot.exec('DELETE FROM sessions; DELETE FROM oauth_states;');
     const files = snapshot.prepare('SELECT id,size,checksum FROM files').all();
     for (const file of files) {
@@ -25,8 +28,21 @@ export async function createBackup(source, destination) {
       const digest = createHash('sha256'); for await (const chunk of fs.createReadStream(output)) digest.update(chunk);
       if (fs.statSync(output).size !== file.size || digest.digest('hex') !== file.checksum) throw new Error('Backup integrity check failed');
     }
+    const extraFiles = [];
+    if (includeUnregisteredFiles) {
+      const registered = new Set(files.map(file => file.id));
+      for (const entry of fs.readdirSync(path.join(root, 'files'), { withFileTypes: true })) {
+        if (registered.has(entry.name)) continue;
+        if (!entry.isFile()) throw new Error('Unexpected entry in stored files');
+        const input = path.join(root, 'files', entry.name), output = path.join(target, 'files', entry.name);
+        fs.copyFileSync(input, output);
+        const digest = createHash('sha256');
+        for await (const chunk of fs.createReadStream(output)) digest.update(chunk);
+        extraFiles.push({ name: entry.name, size: fs.statSync(output).size, checksum: digest.digest('hex') });
+      }
+    }
     snapshot.exec('PRAGMA wal_checkpoint(TRUNCATE)'); snapshot.close(); snapshot = null;
-    const result = { at: new Date().toISOString(), files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), format: 1 };
+    const result = { at: new Date().toISOString(), files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), format: 1, ...(includeUnregisteredFiles ? { extraFiles } : {}) };
     fs.writeFileSync(path.join(target, 'manifest.json'), JSON.stringify(result, null, 2));
     live.prepare("INSERT INTO metadata(key,value) VALUES('last_backup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(result));
     return result;

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { evaluationValue, modelEvaluationFields, isModelData } from '../shared/demo-evaluation.mjs';
 import { now, parse } from './db.mjs';
 import { feishuDocumentLink } from '../shared/requirement-links.mjs';
 import { createWikiApi } from './feishu-wiki-api.mjs';
@@ -155,10 +156,10 @@ export function createRequirementWiki(store, config) {
         ...paragraphs(`${description.title || '未命名 Demo'}\n归属人：${demo.owner}\n版本：V${demo.number} · ${status[demo.status] || demo.status} · ${demo.file_count} 个文件`),
         paragraph([text('在平台查看 Demo（文件下载需相应权限）', url)]),
         ...(description.summary ? paragraphs('简介\n' + description.summary) : []),
+        ...(isModelData(description.category) ? modelEvaluationFields.flatMap(([key, label]) => evaluationValue(description, key) ? paragraphs(label + '\n' + evaluationValue(description, key)) : []) : []),
         ...(description.content ? paragraphs('数据说明\n' + description.content) : []),
         ...(description.costEstimate ? paragraphs('成本预估\n' + description.costEstimate) : []),
         ...(description.dataVolume ? paragraphs('数据量级\n' + description.dataVolume) : []),
-        ...(description.difficulty ? paragraphs('难度说明\n' + description.difficulty) : []),
         ...(description.notes ? paragraphs('注意事项\n' + description.notes) : [])
       ];
     });

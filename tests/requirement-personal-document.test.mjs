@@ -139,7 +139,8 @@ test('personal export requires a PM user consent, uses that user token, preserve
   assert.equal(ready.completedBlocks, ready.totalBlocks);
   assert.ok(ctx.calls.every(call => call.token === 'Bearer user-token-preview-pm'));
   const contents = JSON.stringify([...ctx.batches.values()]);
-  for (const label of ['需求信息', '需求内容', '商务负责人', '研发负责人', '需求文档', 'Demo', '数据简介', '数据说明', '数据量级', '成本预估', '难度说明', '注意事项']) assert.ok(contents.includes(label));
+  for (const label of ['需求信息', '需求内容', '商务负责人', '研发负责人', '需求文档', 'Demo', '数据简介', '数据说明', '数据量级', '成本预估', '注意事项']) assert.ok(contents.includes(label));
+  for (const label of ['模型难度说明', '任务格式', 'Rollout 模型', '通过率']) assert.ok(!contents.includes(label));
   assert.ok(contents.includes('/?demo='));
   assert.ok(contents.includes('验收需求文档.pdf'));
   assert.ok(!contents.includes('user-token-'));
@@ -660,4 +661,28 @@ test('deleting a requirement preserves its exported document and stops an in-fli
   const calls = ctx.calls.length;
   ctx.requirementWiki.enqueue(ctx.id); await ctx.requirementWiki.drain(); assert.equal(ctx.calls.length, calls);
   await ctx.authorized.send(ctx.endpoint).expect(404);
+});
+
+test('exported documents show task format and per-task evaluation, and sync updates measured zero percent on the same document', async t => {
+  const ctx = await liveFixture(t);
+  const linked = ctx.store.one('SELECT v.* FROM versions v JOIN asset_requirements ar ON ar.asset_id=v.asset_id WHERE ar.requirement_id=? ORDER BY v.number DESC LIMIT 1', ctx.id);
+  const description = JSON.parse(linked.description);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ ...description, category: '大模型', difficulty: '模型在多步推理与环境交互中容易遗漏约束', taskFormat: 'harbor_task', rolloutModel: 'EvaluationModel-1', rolloutCount: 5, passRate: 25.5 }), linked.id);
+  ctx.requirementWiki.enqueue(ctx.id); await ctx.requirementWiki.drain();
+  let text = documentText(ctx.roots.get(ctx.documentId));
+  for (const value of ['模型难度说明', '模型在多步推理与环境交互中容易遗漏约束', '任务格式', 'Harbor Task', 'Rollout 模型', 'EvaluationModel-1', '每个任务 Rollout 次数', '5 次 / 任务', '通过率', '25.5%']) assert.ok(text.includes(value), value);
+  const saved = JSON.parse(ctx.store.one('SELECT description FROM versions WHERE id=?', linked.id).description);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ ...saved, passRate: 0 }), linked.id);
+  ctx.requirementWiki.enqueue(ctx.id); await ctx.requirementWiki.drain();
+  text = documentText(ctx.roots.get(ctx.documentId)); assert.ok(text.includes('0%')); assert.ok(!text.includes('25.5%'));
+  assert.equal(ctx.requirementWiki.info(ctx.id).status, 'synced'); assert.equal(ctx.requirementWiki.info(ctx.id).url, ctx.exported.url);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ ...saved, category: '爬虫' }), linked.id);
+  ctx.requirementWiki.enqueue(ctx.id); await ctx.requirementWiki.drain();
+  text = documentText(ctx.roots.get(ctx.documentId));
+  for (const value of ['模型难度说明', '任务格式', 'Rollout 模型', '每个任务 Rollout 次数', '通过率', 'EvaluationModel-1']) assert.ok(!text.includes(value), value);
+  for (const value of ['数据说明', '数据量级', '成本预估']) assert.ok(text.includes(value), value);
+  const retained = JSON.parse(ctx.store.one('SELECT description FROM versions WHERE id=?', linked.id).description);
+  assert.equal(retained.rolloutModel, saved.rolloutModel); assert.equal(retained.passRate, saved.passRate);
+  assert.equal(ctx.requirementWiki.info(ctx.id).status, 'synced'); assert.equal(ctx.requirementWiki.info(ctx.id).url, ctx.exported.url);
+  assert.equal(ctx.documents.length, 1);
 });

@@ -5,10 +5,10 @@ import { personalRequirementSnapshot } from '../server/requirement-personal-docu
 
 const text = block => Object.values(block).flatMap(value => value?.elements || []).map(element => element.text_run.content).join('');
 test('the requirement snapshot follows the agreed template with native headings, code and real attachment placeholders', () => {
-  const description = { title: 'Demo A', summary: '可追溯的样例', content: '# 数据概述\n字段与文件对应\n# 数据格式\n```text\n样本/\n└── data.csv # 样本数据\n```\n字段说明', dataVolume: '5000 条/两周', costEstimate: '¥500', difficulty: '低', notes: '-' };
+  const description = { category: '大模型', title: 'Demo A', summary: '可追溯的样例', content: '# 数据概述\n字段与文件对应\n# 数据格式\n```text\n样本/\n└── data.csv # 样本数据\n```\n字段说明', dataVolume: '5000 条/两周', costEstimate: '¥500', difficulty: '低', notes: '-' };
   const snapshot = personalRequirementSnapshot({ title: '需求名称', status: 'open', category: '爬虫', publisher: { name: '发布人' }, publishDate: '2026-10-28', deadlineDate: '2026-11-10', updatedAt: '2026-10-28T08:07:03.566Z', content: '需求正文', shareUrl: 'http://data.prt-ai.cn:8001/?view=requirements&requirement=Req1', documents: [{ id: 'ReqFile', name: '需求.docx', size: 3 }], businessOwners: [{ name: '商务甲' }], developmentOwners: [{ name: '研发甲' }], demos: [{ owner: { name: '研发甲' }, shareUrl: 'http://data.prt-ai.cn:8001/?demo=Demo1', latest: { description, number: 1, status: 'draft', files: [{ id: 'DemoFile', name: '样例.zip', size: 4 }] } }] });
   assert.equal(snapshot.title, '需求名称');
-  assert.deepEqual(snapshot.blocks.filter(block => block.heading1).map(text), ['需求信息', '需求内容', '负责人', '需求文档', '数据简介', '数据说明', '数据量级', '成本预估', '难度说明', '注意事项', 'Demo']);
+  assert.deepEqual(snapshot.blocks.filter(block => block.heading1).map(text), ['需求信息', '需求内容', '负责人', '需求文档', '数据简介', '模型难度说明', '任务格式', 'Rollout 模型', '每个任务 Rollout 次数', '通过率', '数据说明', '数据量级', '成本预估', '注意事项', 'Demo']);
   assert.deepEqual(snapshot.blocks.filter(block => block.heading2).map(text), ['数据概述', '数据格式', 'Demo A']);
   assert.ok(snapshot.blocks.some(block => block.code && text(block).includes('└── data.csv')));
   assert.ok(!JSON.stringify(snapshot.blocks).includes('```')); assert.ok(!JSON.stringify(snapshot.blocks).includes('comment_ids'));
@@ -27,4 +27,18 @@ test('Markdown formatting uses safe native inline links and preserves long Unico
   assert.ok(!JSON.stringify(blocks).includes('"url":"javascript:'));
   assert.equal(blocks.filter(block => block.code).map(text).join(''), code.trimEnd());
   for (const block of blocks) for (const value of Object.values(block)) for (const element of value?.elements || []) assert.ok(Array.from(element.text_run.content).length <= 1000);
+});
+
+test('non-model exports omit evaluation sections and mixed exports only use model-category Demo values', () => {
+  const requirement = { title: '混合需求', status: 'open', category: '大模型', publisher: { name: '发布人' }, documents: [], demos: [] };
+  const ordinary = { owner: { name: '研发甲' }, latest: { description: { title: '普通 Demo', category: '爬虫', summary: '普通数据简介', content: '# 数据概述\n普通数据内容', difficulty: '隐藏难度', taskFormat: 'trajectory', rolloutModel: 'HiddenModel', rolloutCount: 99, passRate: 100 }, number: 1, status: 'draft', files: [] } };
+  requirement.demos = [ordinary];
+  let snapshot = personalRequirementSnapshot(requirement);
+  const absent = ['模型难度说明', '任务格式', 'Rollout 模型', '每个任务 Rollout 次数', '通过率', '隐藏难度', 'HiddenModel'];
+  for (const value of absent) assert.ok(!JSON.stringify(snapshot.blocks).includes(value), value);
+  assert.ok(snapshot.blocks.some(block => text(block).includes('普通数据内容')));
+  requirement.demos.push({ ...ordinary, latest: { ...ordinary.latest, description: { ...ordinary.latest.description, category: '大模型', title: '模型 Demo', difficulty: '模型的规划约束', rolloutModel: 'VisibleModel', passRate: 0 } } });
+  snapshot = personalRequirementSnapshot(requirement);
+  for (const value of ['模型难度说明', 'VisibleModel', '0%', '模型的规划约束']) assert.ok(JSON.stringify(snapshot.blocks).includes(value), value);
+  for (const value of ['隐藏难度', 'HiddenModel']) assert.ok(!JSON.stringify(snapshot.blocks).includes(value), value);
 });

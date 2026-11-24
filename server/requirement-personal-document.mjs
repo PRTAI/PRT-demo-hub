@@ -5,6 +5,7 @@ import { safeFeishuAppLink } from '../shared/feishu-links.mjs';
 import { heading, paragraph, field, markdownBlocks } from './feishu-document-blocks.mjs';
 import { uploadDocumentAttachments } from './feishu-document-attachments.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { evaluationFields, evaluationValue, modelEvaluationFields, isModelData } from '../shared/demo-evaluation.mjs';
 
 const statusLabels = { open: '进行中', needs_update: '待更新', delivered: '已交付', closed: '已关闭', draft: '草稿', pending: '待审核', returned: '已退回', published: '已发布', offline: '已下架' };
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -36,12 +37,16 @@ export function personalRequirementSnapshot(requirement) {
   }
   files(requirement.documents);
   const demos = requirement.demos.filter(asset => asset.latest);
-  for (const [key, label] of [['summary', '数据简介'], ['content', '数据说明'], ['dataVolume', '数据量级'], ['costEstimate', '成本预估'], ['difficulty', '难度说明'], ['notes', '注意事项']]) {
+  for (const [key, label] of [['summary', '数据简介'], ...modelEvaluationFields, ['content', '数据说明'], ['dataVolume', '数据量级'], ['costEstimate', '成本预估'], ['notes', '注意事项']]) {
+    const modelField = modelEvaluationFields.some(([field]) => field === key);
+    const included = modelField ? demos.filter(asset => isModelData(asset.latest.description.category)) : demos;
+    if (modelField && !included.length) continue;
     blocks.push(heading(label));
     if (!demos.length) blocks.push(paragraph('未填写'));
-    for (const asset of demos) {
+    for (const asset of included) {
       if (demos.length > 1) blocks.push(heading(asset.latest.description.title || '未命名 Demo', 2));
-      blocks.push(...markdownBlocks(asset.latest.description[key], demos.length > 1 ? 3 : 2));
+      const description = asset.latest.description;
+      blocks.push(...markdownBlocks(evaluationFields.some(([field]) => field === key) ? evaluationValue(description, key) : description[key], demos.length > 1 ? 3 : 2));
     }
   }
   blocks.push(heading('Demo'));

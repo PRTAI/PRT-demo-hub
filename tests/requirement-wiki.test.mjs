@@ -204,22 +204,30 @@ test('wiki validates its configured sample and skips all external writes in prev
 test('wiki automatically copies saved Demo description and volume and keeps manual blocks when descriptions change', async t => {
   const ctx = fixture(t);
   ctx.wiki.enqueue(ctx.id); await ctx.wiki.drain();
-  const demo = ctx.demo({ title: '负责人上传样例', summary: '简介内容', content: '# 数据概述\n概述甲\n# 数据格式\n格式甲', dataVolume: '两周产量甲', costEstimate: '成本甲', difficulty: '难度甲', notes: '注意甲' });
+  const demo = ctx.demo({ category: '大模型', title: '负责人上传样例', summary: '简介内容', content: '# 数据概述\n概述甲\n# 数据格式\n格式甲', dataVolume: '两周产量甲', costEstimate: '成本甲', difficulty: '难度甲', taskFormat: 'trajectory', rolloutModel: 'EvaluationModel-wiki', rolloutCount: 3, passRate: 0, notes: '注意甲' });
   ctx.blocks.set('ManualDemo', { block_type: 2, text: { elements: [{ text_run: { content: '人工补充：请保留' } }] } });
   ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   assert.equal(ctx.wiki.info(ctx.id).status, 'synced'); assert.equal(ctx.nodes.length, 1);
   let content = ctx.documentText();
   for (const value of ['负责人上传样例', 'V1 · 草稿', '数据概述', '概述甲', '数据格式', '格式甲', '数据量级', '两周产量甲', '成本预估', '成本甲', '难度说明', '难度甲', '注意事项', '注意甲', '人工补充：请保留']) assert.ok(content.includes(value), value);
+  for (const value of ['模型难度说明', '任务格式', '轨迹', 'Rollout 模型', 'EvaluationModel-wiki', '3 次 / 任务', '0%']) assert.ok(content.includes(value), value);
   const links = [...ctx.blocks.values()].flatMap(block => block.text?.elements || []).map(element => element.text_run.text_element_style?.link?.url).filter(Boolean);
   assert.ok(links.includes('http://data.prt-ai.cn:8001/?demo=' + demo.id));
   const blockCount = ctx.blocks.size;
-  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '新名称', content: '# 数据概述\n概述乙\n# 数据格式\n格式乙', costEstimate: '成本乙', difficulty: '难度乙', notes: '' }), demo.versionId);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ category: '大模型', title: '新名称', content: '# 数据概述\n概述乙\n# 数据格式\n格式乙', costEstimate: '成本乙', difficulty: '难度乙', notes: '' }), demo.versionId);
   ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   content = ctx.documentText(); assert.equal(ctx.blocks.size, blockCount);
   for (const value of ['新名称', '概述乙', '格式乙', '成本乙', '难度乙', '人工补充：请保留']) assert.ok(content.includes(value), value);
   for (const value of ['概述甲', '格式甲', '两周产量甲', '数据量级', '成本甲', '难度甲', '注意甲', '简介内容']) assert.ok(!content.includes(value), value);
   const before = ctx.calls.length; ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
   assert.ok(!ctx.calls.slice(before).some(call => call.url.pathname.includes('/blocks/')));
+  const saved = JSON.parse(ctx.store.one('SELECT description FROM versions WHERE id=?', demo.versionId).description);
+  ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ ...saved, category: '爬虫', rolloutModel: 'RetainedModel', passRate: 0 }), demo.versionId);
+  ctx.wiki.enqueueForAsset(demo.id); await ctx.wiki.drain();
+  content = ctx.documentText();
+  for (const value of ['模型难度说明', '任务格式', 'Rollout 模型', '通过率', '难度乙', 'RetainedModel']) assert.ok(!content.includes(value), value);
+  for (const value of ['概述乙', '格式乙', '成本乙', '人工补充：请保留']) assert.ok(content.includes(value), value);
+  assert.equal(ctx.nodes.length, 1); assert.equal(ctx.wiki.info(ctx.id).status, 'synced');
 });
 
 test('wiki aggregates uploaded Demos, uses the latest usable version and clears content after file removal or unbinding', async t => {
@@ -281,13 +289,15 @@ test('explicit wiki preparation creates historical collaboration documents and l
   await ctx.wiki.drain();
   assert.equal(ctx.wiki.info(ctx.id).status, 'synced');
   assert.equal(ctx.wiki.info(ctx.id).url, 'https://team.feishu.cn/wiki/Wiki1');
-  for (const value of ['旧数据概述', '旧数据格式', '旧数据成本', '旧数据难度', '旧数据注意事项']) assert.ok(ctx.documentText().includes(value));
+  for (const value of ['旧数据概述', '旧数据格式', '旧数据成本', '旧数据注意事项']) assert.ok(ctx.documentText().includes(value));
+  assert.ok(!ctx.documentText().includes('旧数据难度'));
   const blockCount = ctx.blocks.size;
   ctx.store.run('UPDATE versions SET description=? WHERE id=?', JSON.stringify({ title: '旧数据 Demo', content: '# 数据概述\n更新概述\n# 数据格式\n更新格式', costEstimate: '更新成本', difficulty: '更新难度', notes: '更新注意事项' }), demo.versionId);
   ctx.wiki.prepareExport(ctx.id);
   await ctx.wiki.drain();
   assert.equal(ctx.wiki.info(ctx.id).status, 'synced');
   assert.equal(ctx.nodes.length, 1); assert.equal(ctx.blocks.size, blockCount);
-  for (const value of ['更新概述', '更新格式', '更新成本', '更新难度', '更新注意事项']) assert.ok(ctx.documentText().includes(value));
+  for (const value of ['更新概述', '更新格式', '更新成本', '更新注意事项']) assert.ok(ctx.documentText().includes(value));
+  assert.ok(!ctx.documentText().includes('更新难度'));
   assert.ok(!ctx.documentText().includes('旧数据注意事项'));
 });

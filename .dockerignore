@@ -25,6 +25,14 @@ coverage
 *.db
 *.db-wal
 *.db-shm
+compose.recovery.yaml
+*.vhd
+*.vhdx
+*.avhdx
+PRT-data-rescue*
+PRT-data-restored*
+PRT-recovered-files*
+PRT-backups
 # Keep metadata available for the source snapshot copied by both Dockerfiles.
 !/.gitignore
 !/.dockerignore
