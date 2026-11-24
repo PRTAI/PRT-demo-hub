@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { UploadCloud, Plus, Trash2, FileText, Download, Pencil, Send, CheckCircle2, RotateCcw, History, GitCompareArrows, Layers3, ShieldCheck, ChevronRight, ArrowLeft, ArrowUpRight, X, LoaderCircle, Sparkles } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { UploadCloud, Plus, Trash2, FileText, Download, Pencil, Send, CheckCircle2, RotateCcw, History, GitCompareArrows, Layers3, ShieldCheck, ChevronRight, ArrowLeft, ArrowUpRight, X, LoaderCircle, Sparkles, FileDown } from 'lucide-react';
 import { api, uploadFile } from './api';
 import { FilePreview } from './FilePreview';
 import { createRequestId } from './request-id.mjs';
 import { RequirementPicker } from './Requirements';
 import { ShareLink } from './ShareLink';
-import { Modal, ErrorBox, Badge, Avatar, FileIcon, Loading, Empty, bytes, date, actionLabels, roleLabels } from './components';
+import { Modal, ErrorBox, Badge, Avatar, FileIcon, Loading, Empty, bytes, date, actionLabels, roleLabels, statusLabels } from './components';
 
 const blank = { title: '', summary: '', category: '', tags: [], content: '', usage: '', costEstimate: '', difficulty: '', changes: '', schemaVersion: 1 };
 export function Editor({ asset, version, user, config, requirementIds: initialRequirementIds = [], requirements: initialRequirements = [], onClose, onSaved }) {
@@ -94,6 +95,17 @@ export function Detail({ id, user, onClose, onEdit, onChanged, onOpenRequirement
   const [asset, setAsset] = useState(null), [selected, setSelected] = useState(null), [tab, setTab] = useState('description'), [error, setError] = useState(''), [busy, setBusy] = useState(false), [confirm, setConfirm] = useState(null), [reason, setReason] = useState(''), [reviewers,setReviewers]=useState([]), [supervisorId,setSupervisorId]=useState(''), [candidates,setCandidates]=useState([]), [grantUser,setGrantUser]=useState(''), [grantLevel,setGrantLevel]=useState('readonly'), [ccCandidates,setCcCandidates]=useState([]), [ccUserIds,setCcUserIds]=useState([]), [ccRole,setCcRole]=useState('all');
   async function load(openLatest = false) { try { const result = await api(`/assets/${id}`); setAsset(result); setSelected(old => openLatest || !result.versions.some(v => v.id === old) ? result.latest.id : old); } catch (e) { setError(e.message); } }
   useEffect(() => { setTab('description'); setPreview(null); load(true); }, [id]);
+  const [printRequest, setPrintRequest] = useState(0);
+  // Exports the 数据说明 through the browser print dialog ("另存为 PDF"); the document title becomes the default file name.
+  useEffect(() => {
+    if (!printRequest) return;
+    const previousTitle = document.title, finish = () => setPrintRequest(0);
+    document.title = `${description?.title || 'Demo'}-数据说明-V${version?.number || 1}`;
+    document.body.classList.add('printing-description');
+    window.addEventListener('afterprint', finish);
+    const frame = requestAnimationFrame(() => window.print());
+    return () => { cancelAnimationFrame(frame); window.removeEventListener('afterprint', finish); document.body.classList.remove('printing-description'); document.title = previousTitle; };
+  }, [printRequest]);
   useEffect(() => { if (tab === 'permissions' && asset?.canGrant) api(`/assets/${id}/grant-candidates`).then(setCandidates).catch(e => setError(e.message)); }, [tab, asset?.canGrant, id]);
   const version = asset?.versions.find(v => v.id === selected), description = version?.description;
   const isWorking = version && ['draft', 'pending', 'returned'].includes(version.status), canEdit = asset?.canEdit && isWorking && (asset.canManage || version.status !== 'pending');
@@ -114,6 +126,7 @@ export function Detail({ id, user, onClose, onEdit, onChanged, onOpenRequirement
   const detailTabs = asset?.businessRestricted
     ? [['description', '数据说明', FileText], ['files', `文件清单 (${version?.files.length || 0})`, Download]]
     : [['description', '数据说明', FileText], ['files', `文件清单 (${version?.files.length || 0})`, Download], ['history', '版本与差异', GitCompareArrows], ['events', '操作记录', History], ...(asset?.canGrant ? [['permissions', '权限设置', ShieldCheck]] : [])];
+  const descriptionSections = asset?.businessRestricted ? [['difficulty', '难度说明']] : [['costEstimate', '成本预估'], ['difficulty', '难度说明'], ['changes', '本次变更']];
   return <Modal title={description?.title || 'Demo 详情'} subtitle={asset ? `创建人 ${asset.creator.name} · ${date(asset.createdAt)}` : '正在获取数据'} onClose={onClose} wide busy={busy || Boolean(confirm)} actions={asset && <ShareLink url={asset.shareUrl}/> }>
     <div className="detail-body"><ErrorBox>{error}</ErrorBox>{!asset || !version ? error ? <button className="button" onClick={() => { setError(''); load(); }}>重新加载</button> : <Loading/> : <>
       <div className="detail-overview"><div><span className="category-tag">{description.category || '未分类'}</span>{description.tags.map(t => <span className="tag" key={t}>{t}</span>)}<p>{description.summary || '暂无简介'}</p></div><div className="detail-owner"><Avatar user={asset.owner}/><div><small>归属人</small><strong>{asset.owner.name}</strong></div></div></div>
@@ -122,7 +135,8 @@ export function Detail({ id, user, onClose, onEdit, onChanged, onOpenRequirement
       {version.status === 'returned' && returnedEvent && <div className="return-note"><RotateCcw size={18}/><div><strong>主管退回意见</strong><p>{returnedEvent.detail.reason}</p></div></div>}
       {version.status === 'offline' && <div className="return-note"><ShieldCheck size={18}/><div><strong>此版本已下架</strong><p>历史内容保留，文件停止下载。需要继续使用时，请由主管恢复发布。</p></div></div>}
       <section className="detail-panel"><div className="detail-tabs" role="tablist">{detailTabs.map(([key, title, Icon]) => <button className={tab === key ? 'active' : ''} role="tab" aria-selected={tab === key} key={key} onClick={() => setTab(key)}><Icon size={15}/>{title}</button>)}</div>
-      {tab === 'description' && <div className="description-content"><section><h3>数据说明</h3><MarkdownText value={description.content}/></section>{(asset.businessRestricted ? [['difficulty', '难度说明']] : [['costEstimate', '成本预估'], ['difficulty', '难度说明'], ['changes', '本次变更']]).map(([key, title]) => <section key={key}><h3>{title}</h3><p>{description[key] || '暂未填写'}</p></section>)}</div>}
+      {tab === 'description' && <div className="description-content"><section><div className="description-section-head"><h3>数据说明</h3><button type="button" className="button small" onClick={() => setPrintRequest(Date.now())} disabled={!description.content?.trim()} title={description.content?.trim() ? '在打印对话框中选择“另存为 PDF”' : '暂无数据说明可导出'}><FileDown size={15}/>导出 PDF</button></div><MarkdownText value={description.content}/></section>{descriptionSections.map(([key, title]) => <section key={key}><h3>{title}</h3><p>{description[key] || '暂未填写'}</p></section>)}</div>}
+      {printRequest > 0 && <DescriptionPrintSheet asset={asset} version={version} sections={descriptionSections}/>}
       {tab === 'files' && <div className="detail-files"><div className="file-summary">共 {version.files.length} 个文件 · {bytes(version.files.reduce((s, f) => s + f.size, 0))}<span>按原始格式保存</span></div>{!version.files.length ? <Empty title="还没有上传文件" description="编辑此草稿，添加对应的 Demo 文件。"/> : version.files.map(f => <div className="file-row" key={f.id}><FileIcon name={f.name} large/><div><strong>{f.name}</strong><small>{bytes(f.size)} · {f.uploader} · {date(f.createdAt)}</small><small className="checksum">SHA-256 {f.checksum?.slice(0, 20)}…</small></div>{version.status !== 'offline' && <button className="button small" onClick={() => setPreview(f)}>预览</button>}{version.status !== 'offline' ? <a className="button small" href={`/api/versions/${version.id}/files/${f.id}/download`}><Download size={15}/>下载</a> : <span className="muted">已停止下载</span>}</div>)}</div>}
       {tab === 'files' && preview && version.status !== 'offline' && version.files.some(f => f.id === preview.id) && <FilePreview key={version.id + preview.id} versionId={version.id} file={preview} onClose={() => setPreview(null)}/>}
       {!asset.businessRestricted && tab === 'history' && <div className="history-content"><h3>版本时间线</h3><div className="version-timeline">{asset.versions.map(v => <button key={v.id} className={v.id === selected ? 'selected' : ''} onClick={() => setSelected(v.id)}><span className="timeline-dot"/><div><strong>V{v.number} {v.id === asset.currentVersionId && <small>当前发布</small>}</strong><p>{v.description.changes || '首次创建 / 草稿完善'}</p><small>{date(v.updatedAt)} · {v.files.length} 个文件</small></div><Badge status={v.status}/></button>)}</div><h3 className="diff-heading">{comparison ? `V${comparison.number} → V${version.number} 变更对比` : '版本对比'}</h3>{comparison ? <Diff before={comparison} after={version}/> : <p className="muted">这是首个版本，后续版本会在这里展示说明和文件变化。</p>}
@@ -142,6 +156,28 @@ export function Detail({ id, user, onClose, onEdit, onChanged, onOpenRequirement
     </footer>}
     {confirm && <div className="dialog-backdrop"><div className="confirm-panel" role="alertdialog" aria-modal="true" aria-label="确认操作" onKeyDown={e => { if (e.key === 'Escape' && !busy) { e.stopPropagation(); setConfirm(null); } }}><div><h3>{confirm === 'delete' ? '删除未提交草稿' : actionLabels[confirm]}</h3><p>{({ publish: '将当前文件及说明发布为可使用版本，发布后只能通过新版本修改。', submit: '请选择本次负责审核的主管，提交后文件与说明将锁定。', reject: '请写明需要员工补充或调整的内容。', unpublish: '下架后此版本文件将停止下载，历史记录保留。', restore: '恢复后当前版本重新允许下载，并设为默认版本；全部产品经理及关联需求的商务发布人会收到飞书通知。', withdraw: '撤回后恢复为草稿，可以继续修改。', delete: '删除后此草稿不再显示，无法从页面恢复。', set_default: '将此已发布版本设为默认使用版本。' })[confirm]}</p>{confirm === 'publish' && <div className="field">额外抄送人员 <span className="optional">全部产品经理及关联需求的商务发布人会自动收到通知 · 已选 {ccUserIds.length} 人</span><select className="cc-role-filter" aria-label="按身份筛选抄送人员" value={ccRole} onChange={e => setCcRole(e.target.value)}><option value="all">全部身份</option>{Object.entries(roleLabels).filter(([role]) => role !== 'pm').map(([role,label]) => <option key={role} value={role}>{label}</option>)}</select><div className="cc-options">{ccCandidates.filter(person => ccRole === 'all' || person.roles.includes(ccRole)).length ? ccCandidates.filter(person => ccRole === 'all' || person.roles.includes(ccRole)).map(person => <label key={person.id}><input type="checkbox" checked={ccUserIds.includes(person.id)} onChange={e => setCcUserIds(ids => e.target.checked ? [...ids, person.id] : ids.filter(id => id !== person.id))}/><span>{person.name}</span></label>) : <p className="muted">暂无其他可抄送成员</p>}</div></div>}{confirm === 'submit' && <label className="field">审核主管<select value={supervisorId} onChange={e => setSupervisorId(e.target.value)}><option value="">请选择主管</option>{reviewers.filter(p => p.id !== user.id).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}{needsReason && <textarea autoFocus rows={3} aria-label="处理原因" placeholder="请输入处理原因（必填）" value={reason} onChange={e => setReason(e.target.value)}/>}<div><button className="button" autoFocus={!needsReason} disabled={busy} onClick={() => setConfirm(null)}>取消</button><button className={`button ${['unpublish', 'delete'].includes(confirm) ? 'danger' : 'primary'}`} disabled={busy || (needsReason && !reason.trim()) || (confirm === 'submit' && !supervisorId)} onClick={() => act(confirm)}>{busy ? '处理中…' : '确认操作'}</button></div></div></div></div>}
   </Modal>;
+}
+const fullDate = value => new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
+function DescriptionPrintSheet({ asset, version, sections }) {
+  const description = version.description;
+  return createPortal(<article className="description-print-sheet">
+    <header>
+      <div className="description-print-brand">PRT DataHub · 数据说明</div>
+      <h1>{description.title || '未命名 Demo'}</h1>
+      <dl>
+        <div><dt>业务分类</dt><dd>{description.category || '未分类'}</dd></div>
+        <div><dt>归属人</dt><dd>{asset.owner.name}</dd></div>
+        <div><dt>版本</dt><dd>V{version.number} · {statusLabels[version.status] || version.status}</dd></div>
+        <div><dt>更新时间</dt><dd>{fullDate(version.updatedAt)}</dd></div>
+        {asset.requirements.length > 0 && <div className="wide"><dt>关联需求</dt><dd>{asset.requirements.map(item => item.title).join('、')}</dd></div>}
+        {description.tags.length > 0 && <div className="wide"><dt>标签</dt><dd>{description.tags.join('、')}</dd></div>}
+      </dl>
+      {description.summary && <p className="description-print-summary">{description.summary}</p>}
+    </header>
+    <section><h2>数据说明</h2><MarkdownText value={description.content}/></section>
+    {sections.map(([key, title]) => <section key={key}><h2>{title}</h2><p>{description[key] || '暂未填写'}</p></section>)}
+    <footer>PRT 数据样例管理平台 · 导出于 {fullDate(Date.now())}</footer>
+  </article>, document.body);
 }
 function MarkdownText({ value }) {
   if (!value?.trim()) return <p>暂未填写</p>;
