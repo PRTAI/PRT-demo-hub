@@ -10,12 +10,16 @@
 .requirement-status.delivered { background: var(--success-soft); color: var(--success); }
 .requirement-status.closed { background: var(--muted); color: var(--fg-subtle); }
 .requirement-deadline-empty { color: var(--fg-subtle); }
-.requirement-deadline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 1px 8px; border: 1px solid #f3d7b5; border-radius: 4px; background: var(--warning-soft); color: var(--warning); font-size: 12px; font-weight: 500; line-height: 20px; }
+/* Deadlines use a solid orange pill so they stand out; red marks the last day and overdue requirements. */
+.requirement-deadline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 1px 8px; border-radius: 4px; background: #d14900; box-shadow: 0 1px 2px rgba(209, 73, 0, .3); color: #fff; font-size: 12px; font-weight: 600; line-height: 20px; }
 .requirement-deadline > svg { flex: none; }
 .requirement-deadline time { font-family: var(--mono); }
-.requirement-deadline-note { padding-left: 6px; border-left: 1px solid currentColor; font-size: 11px; font-weight: 600; }
-.requirement-deadline.urgent, .requirement-deadline.overdue { border-color: #f4b8b2; background: var(--danger-soft); color: var(--danger); animation: requirement-deadline-pulse 2s ease-in-out infinite; }
-@keyframes requirement-deadline-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(217, 45, 32, .25); } 50% { box-shadow: 0 0 0 3px rgba(217, 45, 32, 0); } }
+.requirement-deadline-note { padding-left: 6px; border-left: 1px solid rgba(255, 255, 255, .6); font-size: 11px; font-weight: 600; }
+.requirement-deadline.urgent { background: var(--danger); animation: requirement-deadline-pulse 2s ease-in-out infinite; }
+.requirement-deadline.overdue { background: #b42318; animation: requirement-deadline-pulse 2s ease-in-out infinite; }
+/* Delivered or closed requirements no longer need attention. */
+.requirement-deadline.settled { background: var(--muted); box-shadow: none; color: var(--fg-subtle); font-weight: 500; }
+@keyframes requirement-deadline-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(217, 45, 32, .35); } 50% { box-shadow: 0 0 0 4px rgba(217, 45, 32, 0); } }
 
 /* --------------------------------------------------------------- the list */
 .requirements-panel { overflow: visible; }
@@ -35,7 +39,6 @@
 .requirement-people-cell > .requirement-person { white-space: nowrap; }
 .requirement-person.more { background: var(--primary-soft); color: var(--primary); }
 .requirement-table .requirement-deadline { flex-wrap: nowrap; white-space: nowrap; }
-.requirement-table .requirement-deadline.normal { padding: 0; border-color: transparent; background: none; color: var(--fg-muted); font-weight: 400; }
 .requirement-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; text-align: left; }
 .requirement-owner-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 10px 0; }
 .requirement-responsible { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--fg-subtle); font-size: 12px; overflow-wrap: anywhere; }
@@ -147,6 +150,8 @@
 .requirement-date-fields, .requirement-owner-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .requirement-date-fields .field { min-width: 0; }
 .requirement-date-fields .field small { display: block; margin-top: 4px; color: var(--fg-subtle); font-size: 12px; font-weight: 400; line-height: 1.6; }
+.requirement-deadline-field > span { display: inline-flex; align-items: center; gap: 5px; vertical-align: top; color: #d14900; font-weight: 600; }
+.requirement-deadline-field > input { color: var(--fg); }
 .requirement-owner-fields { margin-top: 4px; }
 .requirement-owner-picker { min-width: 0; margin: 0; padding: 12px 14px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
 .requirement-owner-picker legend { padding: 0 6px; color: var(--fg); font-size: 13px; font-weight: 600; }

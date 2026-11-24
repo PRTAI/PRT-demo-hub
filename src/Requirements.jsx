@@ -154,7 +154,7 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
       <label className="field">业务分类<select value={editing.category} onChange={event => setEditing({ ...editing, category: event.target.value })} disabled={busy}><option value="">未分类</option>{[...new Set([...(config?.categories || []), editing.category].filter(Boolean))].map(category => <option key={category}>{category}</option>)}</select></label>
       <div className="requirement-date-fields">
         <label className="field">发布日期 <b>*</b><input type="date" min="1900-01-01" max="2199-12-31" required value={publishDate} onChange={event => setEditing({ ...editing, publishDate: event.target.value })} disabled={busy}/><small>默认今天（北京时间）。</small></label>
-        <label className="field">截止日期（可选）<input type="date" min={publishDate} max="2199-12-31" value={editing.deadlineDate || ''} onChange={event => setEditing({ ...editing, deadlineDate: event.target.value })} disabled={busy}/><small>填写后，飞书全天日程覆盖发布日至截止日，不占用忙闲时间。</small></label>
+        <label className="field requirement-deadline-field"><span><CalendarDays size={14}/>截止日期（可选）</span><input type="date" min={publishDate} max="2199-12-31" value={editing.deadlineDate || ''} onChange={event => setEditing({ ...editing, deadlineDate: event.target.value })} disabled={busy}/><small>填写后，飞书全天日程覆盖发布日至截止日，不占用忙闲时间。</small></label>
       </div>
       <div className="requirement-owner-fields">
         <OwnerPicker title="商务负责人" description="负责业务沟通与客户对接" users={assigneeUsers} roles={businessOwnerRoles} selectedUsers={editing.businessOwners || []} value={editing.businessUserIds || editing.businessOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, businessUserIds: ids }))} disabled={busy}/>
@@ -235,7 +235,7 @@ function RequirementDeadline({ requirement, compact = false }) {
   const state = requirementDeadlineState(deadlineDate, status, currentTime);
   const label = compact ? '' : '截止日期：';
   if (state === 'none') return <span className="requirement-deadline-empty">{label}未设置</span>;
-  return <span className={`requirement-deadline ${state}`} title="按北京时间截止当天结束计算">
+  return <span className={`requirement-deadline ${state}${['closed', 'delivered'].includes(status) ? ' settled' : ''}`} title="按北京时间截止当天结束计算">
     <CalendarDays size={14}/><span>{label}<time dateTime={deadlineDate}>{deadlineDate}</time></span>
     {state === 'urgent' && <span className="requirement-deadline-note">不足 24 小时</span>}
     {state === 'overdue' && <span className="requirement-deadline-note">已逾期</span>}
