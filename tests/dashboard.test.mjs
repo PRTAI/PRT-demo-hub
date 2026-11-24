@@ -34,24 +34,14 @@ test('dashboard figures only cover the Demos each role may open', async t => {
   const f = fixture(t);
   await request(f.app).get('/api/dashboard').expect(401);
   const pm = await f.login('preview-pm');
-  await pm('/dashboard?period=year').expect(400);
 
   const all = (await pm('/dashboard').expect(200)).body;
-  assert.equal(all.period, 'month');
+  assert.deepEqual(Object.keys(all).sort(), ['categories', 'deadlines', 'demos', 'generatedAt', 'recent', 'requirements', 'statuses', 'today']);
   assert.deepEqual(all.demos, { total: 8, published: 4, pending: 1, incomplete: 2, versions: 8, pendingReviews: 0 });
   assert.deepEqual(Object.fromEntries(all.statuses.map(item => [item.key, item.count])), { published: 4, pending: 1, draft: 1, returned: 1, offline: 1 });
   assert.deepEqual(Object.fromEntries(all.categories.map(item => [item.name, item.count])), { 零售与消费: 2, 工业制造: 2, 通用数据: 2, 金融服务: 1, 医疗健康: 1 });
-  assert.deepEqual(all.contributors[0], { id: 'preview-employee', name: '陈思远', demos: 3, published: 2 });
   assert.equal(all.recent.length, 4);
   assert.deepEqual(Object.keys(all.recent[0]).sort(), ['category', 'id', 'number', 'owner', 'publishedAt', 'title']);
-  assert.equal(all.trend.length, 6);
-  assert.equal(all.trend.at(-1).key, all.today.slice(0, 7));
-  assert.deepEqual(['demos', 'published', 'requirements'].map(key => all.trend.reduce((sum, item) => sum + item[key], 0)), [8, 4, 1]);
-
-  const weekly = (await pm('/dashboard?period=week').expect(200)).body;
-  assert.equal(weekly.trend.length, 12);
-  assert.ok(weekly.trend.every(item => new Date(item.key + 'T00:00:00Z').getUTCDay() === 1));
-  assert.equal(weekly.trend.reduce((sum, item) => sum + item.demos, 0), 8);
 
   for (const id of ['preview-employee', 'preview-manager', 'preview-other', 'preview-other-manager', 'preview-business', 'preview-admin']) {
     const get = await f.login(id), board = (await get('/dashboard').expect(200)).body, catalog = (await get('/catalog').expect(200)).body;
@@ -64,11 +54,11 @@ test('dashboard figures only cover the Demos each role may open', async t => {
   const manager = await f.login('preview-manager');
   assert.equal((await manager('/dashboard').expect(200)).body.demos.pendingReviews, 1);
   const other = await f.login('preview-other'), isolated = (await other('/dashboard').expect(200)).body;
-  assert.deepEqual(isolated.contributors.map(item => item.id), ['preview-other']);
+  assert.equal(isolated.demos.total, 1);
   assert.deepEqual(isolated.recent.map(item => item.title), ['项目二组经营数据']);
   const admin = await f.login('preview-admin'), empty = (await admin('/dashboard').expect(200)).body;
   assert.equal(empty.demos.total, 0);
-  assert.deepEqual([empty.categories, empty.contributors, empty.recent], [[], [], []]);
+  assert.deepEqual([empty.categories, empty.recent], [[], []]);
 });
 
 test('dashboard requirement figures follow requirement visibility and Beijing deadlines', async t => {
@@ -102,23 +92,11 @@ test('dashboard requirement figures follow requirement visibility and Beijing de
   assert.equal(dashboardData(f.store, f.user('preview-unassigned')).requirements.total, 0);
 });
 
-test('dashboard trend buckets and deadline windows use Beijing dates', t => {
+test('dashboard deadline windows use Beijing dates', t => {
   const f = fixture(t), currentTime = Date.parse('2026-03-01T17:00:00Z');
-  const [mondayDemo, sundayDemo] = f.store.all("SELECT id FROM assets WHERE owner_id='preview-employee' ORDER BY id").map(row => row.id);
-  f.store.run('UPDATE assets SET created_at=? WHERE id=?', '2026-03-01T16:30:00.000Z', mondayDemo);
-  f.store.run('UPDATE assets SET created_at=? WHERE id=?', '2026-03-01T15:59:00.000Z', sundayDemo);
   for (const [title, deadline] of [['逾期', '2026-03-01'], ['今日截止', '2026-03-02'], ['第七天截止', '2026-03-08'], ['第八天截止', '2026-03-09']]) f.requirement(title, 'open', deadline);
-  const pm = f.user('preview-pm');
-
-  const weekly = dashboardData(f.store, pm, { period: 'week' }, currentTime);
-  assert.equal(weekly.today, '2026-03-02');
-  assert.deepEqual([weekly.trend[0].key, weekly.trend.at(-1).key], ['2025-12-15', '2026-03-02']);
-  assert.deepEqual(weekly.trend.filter(item => item.demos).map(item => [item.key, item.demos]), [['2026-02-23', 1], ['2026-03-02', 1]]);
-
-  const monthly = dashboardData(f.store, pm, {}, currentTime);
-  assert.deepEqual(monthly.trend.map(item => item.key), ['2025-10', '2025-11', '2025-12', '2026-01', '2026-02', '2026-03']);
-  assert.deepEqual(monthly.trend.map(item => item.demos), [0, 0, 0, 0, 0, 2]);
-  assert.deepEqual({ overdue: monthly.requirements.overdue, dueSoon: monthly.requirements.dueSoon }, { overdue: 1, dueSoon: 2 });
-  assert.deepEqual(monthly.deadlines.map(item => item.title), ['逾期', '今日截止', '第七天截止', '第八天截止']);
-  assert.throws(() => dashboardData(f.store, pm, { period: 'day' }, currentTime));
+  const board = dashboardData(f.store, f.user('preview-pm'), currentTime);
+  assert.equal(board.today, '2026-03-02');
+  assert.deepEqual({ overdue: board.requirements.overdue, dueSoon: board.requirements.dueSoon }, { overdue: 1, dueSoon: 2 });
+  assert.deepEqual(board.deadlines.map(item => item.title), ['逾期', '今日截止', '第七天截止', '第八天截止']);
 });
