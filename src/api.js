@@ -7,7 +7,8 @@ function failure(message, status) {
 }
 export async function api(url, options = {}) {
   const response = await fetch('/api' + url, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'PRT', 'X-CSRF-Token': csrf, ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
-  const data = await response.json().catch(() => ({}));
+  // An aborted body read must surface as AbortError, not as an empty successful payload.
+  const data = await response.json().catch(error => { if (error.name === 'AbortError') throw error; return {}; });
   if (!response.ok) throw failure(data.error || '请求失败，请稍后重试', response.status);
   return data;
 }

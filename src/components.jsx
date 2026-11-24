@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { ArrowLeft, LoaderCircle, FileArchive, FileText, Database, ArrowUpRight, Check, AlertCircle } from 'lucide-react';
+import { ArrowLeft, LoaderCircle, FileArchive, FileText, Database, ArrowUpRight, Check, AlertCircle, X } from 'lucide-react';
 export const statusLabels = { draft: '草稿', pending: '待审核', returned: '已退回', published: '已发布', offline: '已下架' };
 export const roleLabels = { employee: '员工', supervisor: '主管', pm: '产品经理', business: '商务', admin: '管理员' };
 export const actionLabels = { backup_start: '开始备份', backup_complete: '备份完成', backup_failed: '备份失败', create: '创建 Demo', edit: '更新数据说明', upload: '上传文件', remove_file: '移除文件', submit: '提交审核', withdraw: '撤回提交', reject: '退回修改', publish: '发布版本', unpublish: '下架版本', restore: '恢复发布', set_default: '设为默认版本', new_version: '创建新版本', download: '下载文件', transfer: '资产交接', delete_draft: '删除草稿', user_update: '更新人员权限', user_delete: '删除账号', user_restore: '恢复账号', settings_update: '更新基础配置', requirement_publish: '发布需求', requirement_edit: '修改需求', requirement_forward: '转发需求', requirement_close: '关闭需求', requirement_reopen: '重新开启需求', requirement_status: '更新需求状态', requirements_update: '更新需求绑定' };
@@ -7,10 +7,12 @@ export const date = value => value ? new Intl.DateTimeFormat('zh-CN', { month: '
 export function bytes(value) { if (!value) return '0 B'; const i = Math.min(3, Math.floor(Math.log(value) / Math.log(1024))); return `${(value / 1024 ** i).toFixed(i ? 1 : 0)} ${['B', 'KB', 'MB', 'GB'][i]}`; }
 export function Badge({ status }) { return <span className={`badge ${status}`}><i />{statusLabels[status] || status}</span>; }
 export function Avatar({ user, small = false }) { return <span className={`avatar ${small ? 'small' : ''}`} aria-label={user?.name}>{user?.name?.slice(-2) || 'PR'}</span>; }
-export function FileIcon({ name = '', large = false }) { const archive = /\.(zip|rar|7z|tar|gz)$/i.test(name); const Icon = archive ? FileArchive : /\.(csv|json|xlsx?)$/i.test(name) ? Database : FileText; return <span className={`file-icon ${large ? 'large' : ''} ${archive ? 'archive' : ''}`}><Icon size={large ? 25 : 20}/></span>; }
-export function Empty({ title = '暂时没有 Demo', description = '上传第一个数据样例，让数据更容易被管理和复用。', action }) { return <div className="empty"><div className="empty-icon"><Database size={32}/></div><h3>{title}</h3><p>{description}</p>{action}</div>; }
-export function Loading() { return <div className="loading"><LoaderCircle className="spin" size={24}/><span>正在加载…</span></div>; }
-export function ErrorBox({ children }) { return children ? <div className="error-box" role="alert"><AlertCircle size={17}/><span>{children}</span></div> : null; }
+export function FileIcon({ name = '', large = false }) { const archive = /\.(zip|rar|7z|tar|gz)$/i.test(name); const Icon = archive ? FileArchive : /\.(csv|json|xlsx?)$/i.test(name) ? Database : FileText; return <span className={`file-icon ${large ? 'large' : ''} ${archive ? 'archive' : ''}`}><Icon size={large ? 20 : 17}/></span>; }
+export function PageHeader({ title, description, actions }) { return <section className="page-header"><div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="page-header-actions">{actions}</div>}</section>; }
+export function Empty({ title = '暂时没有 Demo', description = '上传第一个数据样例，让数据更容易被管理和复用。', action }) { return <div className="empty"><div className="empty-icon"><Database size={24}/></div><h3>{title}</h3><p>{description}</p>{action}</div>; }
+export function Loading() { return <div className="loading"><LoaderCircle className="spin" size={18}/><span>正在加载…</span></div>; }
+export function ErrorBox({ children }) { return children ? <div className="error-box" role="alert"><AlertCircle size={15}/><span>{children}</span></div> : null; }
+// Wide modals are full workspace pages for primary workflows; the others are centered dialogs.
 export function Modal({ title, subtitle, children, onClose, wide = false, busy = false, actions }) {
   const ref = useRef();
   const behavior = useRef({ busy, onClose }); behavior.current = { busy, onClose };
@@ -23,7 +25,8 @@ export function Modal({ title, subtitle, children, onClose, wide = false, busy =
     };
     document.addEventListener('keydown', key); return () => { document.body.style.overflow = previousOverflow; document.removeEventListener('keydown', key); previous?.focus(); };
   }, []);
-  return <div className="workspace-page-shell"><section className={`workspace-page modal ${wide ? 'wide' : ''}`} role="region" aria-label={title} tabIndex={-1} ref={ref}><header className="modal-header page-view-header"><button className="page-back" aria-label="返回上一页" onClick={onClose} disabled={busy}><ArrowLeft size={19}/>返回</button><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{actions && <div className="page-view-actions">{actions}</div>}</header>{children}</section></div>;
+  if (!wide) return <div className="dialog-backdrop"><section className="modal dialog" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}><header className="modal-header dialog-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{actions}<button className="icon-button" aria-label="关闭" onClick={onClose} disabled={busy}><X size={16}/></button></header>{children}</section></div>;
+  return <div className="workspace-page-shell"><section className="workspace-page modal wide" role="region" aria-label={title} tabIndex={-1} ref={ref}><header className="modal-header page-view-header"><button className="page-back" aria-label="返回上一页" onClick={onClose} disabled={busy}><ArrowLeft size={16}/>返回</button><span className="page-view-divider" aria-hidden="true"/><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{actions && <div className="page-view-actions">{actions}</div>}</header>{children}</section></div>;
 }
-export function Toast({ message }) { return message ? <div className="toast" role="status"><Check size={18}/>{message}</div> : null; }
+export function Toast({ message }) { return message ? <div className="toast" role="status"><Check size={16}/>{message}</div> : null; }
 export function RowLink({ children, onClick }) { return <button className="text-link" onClick={onClick}>{children}<ArrowUpRight size={14}/></button>; }

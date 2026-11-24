@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowLeft, ArrowUpRight, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, Forward, Link2, Plus, Search, UploadCloud, Users, X } from 'lucide-react';
 import { api, downloadFile, uploadRequirementDocument } from './api';
-import { Badge, Empty, ErrorBox, Loading, Modal, bytes, date, roleLabels } from './components';
+import { Badge, Empty, ErrorBox, Loading, Modal, PageHeader, bytes, date, roleLabels } from './components';
 import { appendRequirementDocuments, droppedRequirementDocuments } from './requirement-documents.mjs';
 import { ShareLink } from './ShareLink';
 import { textLinks, feishuDocumentLink } from '../shared/requirement-links.mjs';
@@ -111,10 +111,10 @@ export function RequirementsPage({ user, config, selectedId, refreshKey, onSelec
   async function unbind(asset) { if (!window.confirm(`解除与「${asset.latest.description.title || '未命名 Demo'}」的绑定？`)) return; setBusy(true); setError(''); try { await api(`/requirements/${detail.id}/demos/${asset.id}`, { method: 'DELETE', body: { revision: asset.revision } }); refresh(); notify('绑定已解除'); } catch (error) { setError(error.message); } finally { setBusy(false); } }
   if (editing) return <RequirementForm editing={editing} setEditing={setEditing} config={config} assigneeUsers={assigneeUsers} pendingDocuments={pendingDocuments} setPendingDocuments={setPendingDocuments} uploadProgress={uploadProgress} error={error} busy={busy} save={save} cancelEdit={cancelEdit}/>;
   return <>
-    <section className="page-heading"><div><div className="eyebrow">BUSINESS REQUIREMENTS</div><h1>{assignedOnly ? '我的需求' : '需求中心'}<span className="heading-dot">.</span></h1><p>{assignedOnly ? '查看指定给当前账号的业务需求和交付进展。' : '从业务需求出发，关联数据样例并跟进演示准备。'}</p></div>{canPublish && !assignedOnly && <button className="button primary" disabled={busy} onClick={() => { setError(''); setPendingDocuments([]); setEditing({ ...blank }); }}><Plus size={17}/>发布需求</button>}</section>
+    <PageHeader title={assignedOnly ? '我的需求' : '需求中心'} description={assignedOnly ? '查看指定给当前账号的业务需求和交付进展。' : '从业务需求出发，关联数据样例并跟进演示准备。'} actions={canPublish && !assignedOnly && <button className="button primary" disabled={busy} onClick={() => { setError(''); setPendingDocuments([]); setEditing({ ...blank }); }}><Plus size={16}/>发布需求</button>}/>
     <ErrorBox>{error}</ErrorBox>
     {selectedId ? <>
-      <button type="button" className="button requirement-back" onClick={() => onSelect(null)}><ArrowLeft size={16}/>返回需求列表</button>
+      <button type="button" className="button small requirement-back" onClick={() => onSelect(null)}><ArrowLeft size={14}/>返回需求列表</button>
       {loading ? <Loading/> : detail && <RequirementDetail detail={detail} canCreateDemo={canCreateDemo} busy={busy} binding={binding} setBinding={setBinding} onCreateDemo={onCreateDemo} onOpenDemo={onOpenDemo} onEdit={() => { setPendingDocuments([]); setEditing({ ...detail, assignedUserIds: detail.assignedUsers.map(item => item.id) }); }} onStatus={changeStatus} onUnbind={unbind} onBound={() => { refresh(); notify('Demo 已绑定'); }} onForwarded={count => { refresh(); notify(count ? `需求已转发，新增关联 ${count} 人` : '所选人员已关联，无需重复转发'); }}/>}</> :
       <RequirementList data={data} loading={loading} query={query} setQuery={value => { setQuery(value); setPage(1); }} status={status} setStatus={value => { setStatus(value); setPage(1); }} onSelect={onSelect} canPublish={canPublish} canExport={canExport} page={page} onPage={setPage} exporting={exporting} exportJob={exportJob} onExport={exportRequirements} onRetryExport={retryExport} onRefreshExport={() => { setError(''); setExportRefresh(value => value + 1); }} onCloseExport={closeExport}/>
     }
@@ -135,7 +135,7 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
   }
   const publishDate = editing.publishDate || editing.plannedDate || requirementDate();
   return <>
-    <section className="page-heading"><div><div className="eyebrow">BUSINESS REQUIREMENTS</div><h1>{editing.id ? '编辑需求' : '发布需求'}<span className="heading-dot">.</span></h1><p>说明业务场景、需要的数据和验收标准，方便团队准备 Demo。</p></div></section>
+    <PageHeader title={editing.id ? '编辑需求' : '发布需求'} description="说明业务场景、需要的数据和验收标准，方便团队准备 Demo。"/>
     <form className="settings-card requirement-form" onSubmit={save}>
       <ErrorBox>{error}</ErrorBox>
       <label className="field">需求标题 <b>*</b><input autoFocus required maxLength={120} value={editing.title} onChange={event => setEditing({ ...editing, title: event.target.value })} disabled={busy}/></label>
@@ -155,7 +155,7 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
         <p className="muted">支持拖入多个文件，也可多次点击添加，已选文件会保留并自动去重。单文件 ≤ {config?.maxFileMB || 512} MB。</p>
         <input ref={documentInput} type="file" multiple hidden aria-label="选择需求文档" disabled={busy} onChange={event => { addDocuments(Array.from(event.target.files || [])); event.target.value = ''; }}/>
         <button type="button" className={`requirement-document-dropzone ${dragging ? 'dragging' : ''}`} disabled={busy} onClick={() => documentInput.current.click()} onDragEnter={event => { event.preventDefault(); if (!busy && Array.from(event.dataTransfer.types || []).includes('Files')) { dragDepth.current++; setDragging(true); } }} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; }} onDragLeave={event => { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }} onDrop={dropDocuments}>
-          <UploadCloud size={30}/><strong>{busy ? '文档保存中…' : dragging ? '松开鼠标，添加需求文档' : '拖动需求文档到这里，或点击选择'}</strong><span>可多选、可分次添加；发布或保存时上传</span>
+          <UploadCloud size={24}/><strong>{busy ? '文档保存中…' : dragging ? '松开鼠标，添加需求文档' : '拖动需求文档到这里，或点击选择'}</strong><span>可多选、可分次添加；发布或保存时上传</span>
         </button>
         <ErrorBox>{documentError}</ErrorBox>
         {!!editing.documents?.length && <p className="muted">已保存 {editing.documents.length} 个文档，本次添加会保留已有文档。</p>}
@@ -184,6 +184,7 @@ function OwnerPicker({ title, description, users, roles, selectedUsers, value, o
 
 function RequirementList({ data, loading, query, setQuery, status, setStatus, onSelect, canPublish, canExport, page, onPage, exporting, exportJob, onExport, onRetryExport, onRefreshExport, onCloseExport }) {
   return <section className="asset-panel requirements-panel">
+    <div className="panel-title"><div><h2>需求列表</h2><span>{data?.total || 0} 项需求</span></div></div>
     <div className="filter-row"><div className="search-box"><Search size={17}/><input aria-label="搜索需求或负责人" placeholder="搜索负责人、需求标题、内容或发布人…" value={query} onChange={event => setQuery(event.target.value)}/></div><StatusMenu value={status} onChange={setStatus} ariaLabel="需求状态"/>{canExport && data?.canExport && <button type="button" className="button" disabled={loading || exporting || ['pending', 'ready'].includes(exportJob?.status) || !data?.total} onClick={onExport} title="同步当前筛选下的需求飞书文档，完成后导出全部结果"><ArrowDownToLine size={16}/>{exporting ? '提交中…' : exportJob?.status === 'pending' ? '同步文档中…' : exportJob?.status === 'ready' ? '下载中…' : '导出 Excel'}</button>}</div>
     {canExport && exportJob && <div className="requirement-export-progress" role="status" aria-live="polite">
       <strong>{exportJob.status === 'ready' ? '文档同步完成，正在准备下载表格' : exportJob.status === 'failed' ? '部分飞书文档同步失败，请重试失败项' : '正在创建或更新筛选需求的飞书文档'}</strong>
@@ -193,17 +194,14 @@ function RequirementList({ data, loading, query, setQuery, status, setStatus, on
       <div className="requirement-actions"><button type="button" className="button small" disabled={exporting} onClick={onRefreshExport}>{exportJob.status === 'ready' ? '重新下载' : '刷新导出进度'}</button>{exportJob.failed > 0 && <button type="button" className="button primary small" disabled={exporting} onClick={onRetryExport}>重试失败项</button>}<button type="button" className="button small" disabled={exporting} onClick={onCloseExport} title="关闭后后台文档同步仍会继续">关闭进度</button></div>
     </div>}
     <p className="requirement-list-hint">按截止日期从早到晚排列，未设置截止日期的靠后，已关闭需求排在最后。</p>
-    {loading ? <Loading/> : data?.items.length ? <div className="requirement-list">{data.items.map(item => <article className="requirement-row" key={item.id}>
-      <div className="requirement-list-main">
-        <button className="requirement-title" onClick={() => onSelect(item.id)}><strong>{item.title}</strong><span className={`requirement-status ${item.status}`}>{statusLabel(item.status)}</span></button>
-        <p>{renderLinkedText(item.content)}</p>
-        <RequirementOwners requirement={item}/>
-        <small className="requirement-list-meta"><span>发布人 {item.publisher.name} · {item.category || '未分类'} · 发布 {item.publishDate}</span><RequirementDeadline requirement={item}/><span>更新 {date(item.updatedAt)}</span></small>
-        {item.wiki?.url && <a className="requirement-wiki-link" href={item.wiki.url} target="_blank" rel="noopener noreferrer"><FileText size={14}/>飞书协作文档<ExternalLink size={12}/></a>}
-        <ShareLink url={item.shareUrl}/>
-      </div>
-      <button className="requirement-count" onClick={() => onSelect(item.id)} aria-label={`查看需求 ${item.title}`}>{item.demoCount} 个可见 Demo<ArrowUpRight size={16}/></button>
-    </article>)}</div> : <Empty title="暂无匹配需求" description={canPublish ? '尝试搜索负责人姓名，或发布新的业务需求。' : '仅展示指定给你的需求，可按负责人姓名搜索。'}/>}
+    {loading ? <Loading/> : data?.items.length ? <div className="table-scroll"><table className="asset-table requirement-table"><thead><tr><th>需求名称</th><th>状态</th><th>商务负责人</th><th>研发负责人</th><th>截止时间</th><th className="actions">操作</th></tr></thead><tbody>{data.items.map(item => <tr key={item.id}>
+      <td><button className="asset-name" title={item.title} onClick={() => onSelect(item.id)}><strong>{item.title}</strong></button></td>
+      <td><span className={`requirement-status ${item.status}`}>{statusLabel(item.status)}</span></td>
+      <td data-label="商务负责人"><PeopleCell users={item.businessOwners}/></td>
+      <td data-label="研发负责人"><PeopleCell users={item.developmentOwners}/></td>
+      <td data-label="截止时间"><RequirementDeadline requirement={item} compact/></td>
+      <td className="actions"><button className="table-open" onClick={() => onSelect(item.id)}>查看详情</button></td>
+    </tr>)}</tbody></table></div> : <Empty title="暂无匹配需求" description={canPublish ? '尝试搜索负责人姓名，或发布新的业务需求。' : '仅展示指定给你的需求，可按负责人姓名搜索。'}/>}
     {data && <Pager data={data} onPage={onPage} busy={loading}/>}
   </section>;
 }
@@ -212,11 +210,17 @@ function ResponsiblePeople({ users = [], label }) {
   return <div className="requirement-responsible"><Users size={14}/><span>{label}</span>{users.length ? users.map(user => <span className="requirement-person" key={user.id}>{user.name}</span>) : <span className="muted">未指定</span>}</div>;
 }
 
+// List cells show the first few names; the full list stays in the tooltip and on the detail page.
+function PeopleCell({ users = [], limit = 3 }) {
+  if (!users.length) return <span className="muted">未指定</span>;
+  return <div className="requirement-people-cell" title={users.map(user => user.name).join('、')}>{users.slice(0, limit).map(user => <span className="requirement-person" key={user.id}>{user.name}</span>)}{users.length > limit && <span className="requirement-person more">+{users.length - limit}</span>}</div>;
+}
+
 function RequirementOwners({ requirement }) {
   return <div className="requirement-owner-summary"><ResponsiblePeople label="商务负责人" users={requirement.businessOwners}/><ResponsiblePeople label="研发负责人" users={requirement.developmentOwners}/></div>;
 }
 
-function RequirementDeadline({ requirement }) {
+function RequirementDeadline({ requirement, compact = false }) {
   const [currentTime, setCurrentTime] = useState(Date.now);
   const { deadlineDate, status } = requirement;
   useEffect(() => {
@@ -229,9 +233,10 @@ function RequirementDeadline({ requirement }) {
     return () => { clearInterval(timer); window.removeEventListener('focus', update); document.removeEventListener('visibilitychange', update); };
   }, [deadlineDate, status]);
   const state = requirementDeadlineState(deadlineDate, status, currentTime);
-  if (state === 'none') return <span className="requirement-deadline-empty">截止日期：未设置</span>;
+  const label = compact ? '' : '截止日期：';
+  if (state === 'none') return <span className="requirement-deadline-empty">{label}未设置</span>;
   return <span className={`requirement-deadline ${state}`} title="按北京时间截止当天结束计算">
-    <CalendarDays size={14}/><span>截止日期：<time dateTime={deadlineDate}>{deadlineDate}</time></span>
+    <CalendarDays size={14}/><span>{label}<time dateTime={deadlineDate}>{deadlineDate}</time></span>
     {state === 'urgent' && <span className="requirement-deadline-note">不足 24 小时</span>}
     {state === 'overdue' && <span className="requirement-deadline-note">已逾期</span>}
   </span>;
@@ -295,26 +300,32 @@ function RequirementWikiStatus({ requirement }) {
 function RequirementDetail({ detail, canCreateDemo, busy, binding, setBinding, onCreateDemo, onOpenDemo, onEdit, onStatus, onUnbind, onBound, onForwarded }) {
   const [forwarding, setForwarding] = useState(false);
   return <>
-    <section className="settings-card requirement-detail">
-      <div className="requirement-title"><h2>{detail.title}</h2><span className={`requirement-status ${detail.status}`}>{statusLabel(detail.status)}</span><ShareLink url={detail.shareUrl}/></div>
-      <div className="requirement-meta requirement-list-meta"><span>发布人 {detail.publisher.name} · {detail.category || '未分类'} · 发布日期 {detail.publishDate}</span><RequirementDeadline requirement={detail}/><span>更新于 {date(detail.updatedAt)}</span></div>
-      <div className="requirement-content">{renderLinkedText(detail.content)}</div>
-      <RequirementLinkPreviews key={`${detail.id}:${detail.revision}`} requirement={detail}/>
-      <RequirementOwners requirement={detail}/>
-      <RequirementCalendarStatus requirement={detail}/>
-      <RequirementWikiStatus requirement={detail}/>
-      {(detail.canManage || detail.canStatusManage || detail.canForward) && <div className="requirement-actions">{detail.canForward && <button type="button" className="button" disabled={busy} onClick={() => setForwarding(true)}><Forward size={16}/>转发需求</button>}{detail.canManage && <button className="button" disabled={busy} onClick={onEdit}>编辑需求 / 上传文档</button>}{detail.canStatusManage && <StatusMenu value={detail.status} onChange={onStatus} ariaLabel="修改需求状态" disabled={busy} filter={false}/>}</div>}
-    </section>
-    <section className="settings-card requirement-documents">
-      <div className="panel-title"><div><h2><FileText size={18}/>需求文档</h2><span>{detail.documents?.length || 0} 个文件</span></div></div>
-      {detail.documents?.length ? <div className="requirement-document-list">{detail.documents.map(file => <a className="requirement-document" key={file.id} href={`/api/requirements/${detail.id}/documents/${file.id}/download`}><FileText size={16}/><span>{file.name}<small>{Math.ceil(file.size / 1024)} KB</small></span><ArrowDownToLine size={16}/></a>)}</div> : <p className="muted">暂无需求文档</p>}
-    </section>
-    <section className="asset-panel requirement-demos">
-      <div className="panel-title"><div><h2>关联 Demo</h2><span>{detail.demos.length} 个可见 Demo</span></div>{['open', 'needs_update'].includes(detail.status) && <div className="requirement-actions">{canCreateDemo && <button className="button" onClick={() => onCreateDemo(detail)}><Plus size={16}/>上传 Demo</button>}{detail.canManage && <button className="button primary" onClick={() => setBinding(value => !value)}><Link2 size={16}/>{binding ? '收起绑定' : '绑定已有 Demo'}</button>}</div>}</div>
-      <p className="requirement-access-note">仅展示你有权查看的 Demo；员工或主管可上传 Demo 并默认关联当前需求，需求内容与文档仍由发布人管理。</p>
-      {binding && detail.canManage && <BindDemo requirement={detail} onBound={onBound}/>}
-      {detail.demos.length ? <div className="requirement-demo-list">{detail.demos.map(asset => <div key={asset.id}><button className="requirement-demo-open" onClick={() => onOpenDemo(asset.id)}><div><strong>{asset.latest.description.title || '未命名 Demo'}</strong><small>{asset.owner.name} · V{asset.latest.number}</small></div><Badge status={asset.latest.status}/><ArrowUpRight size={16}/></button>{detail.canManage && <button className="button small" disabled={busy} onClick={() => onUnbind(asset)}>解除绑定</button>}</div>)}</div> : <Empty title="还没有可见的关联 Demo" description={detail.canManage ? '可以绑定已有 Demo。' : '此处仅展示你有权查看的关联 Demo。'}/>}
-    </section>
+    <div className="requirement-detail-layout">
+      <div className="requirement-detail-main">
+        <section className="settings-card requirement-detail">
+          <div className="requirement-title"><h2>{detail.title}</h2><span className={`requirement-status ${detail.status}`}>{statusLabel(detail.status)}</span><ShareLink url={detail.shareUrl}/></div>
+          <div className="requirement-meta requirement-list-meta"><span>发布人 {detail.publisher.name} · {detail.category || '未分类'} · 发布日期 {detail.publishDate}</span><RequirementDeadline requirement={detail}/><span>更新于 {date(detail.updatedAt)}</span></div>
+          <div className="requirement-content">{renderLinkedText(detail.content)}</div>
+          <RequirementLinkPreviews key={`${detail.id}:${detail.revision}`} requirement={detail}/>
+          {(detail.canManage || detail.canStatusManage || detail.canForward) && <div className="requirement-actions">{detail.canForward && <button type="button" className="button" disabled={busy} onClick={() => setForwarding(true)}><Forward size={15}/>转发需求</button>}{detail.canManage && <button className="button" disabled={busy} onClick={onEdit}>编辑需求 / 上传文档</button>}{detail.canStatusManage && <StatusMenu value={detail.status} onChange={onStatus} ariaLabel="修改需求状态" disabled={busy} filter={false}/>}</div>}
+        </section>
+        <section className="settings-card requirement-documents">
+          <div className="panel-title"><div><h2><FileText size={16}/>需求文档</h2><span>{detail.documents?.length || 0} 个文件</span></div></div>
+          {detail.documents?.length ? <div className="requirement-document-list">{detail.documents.map(file => <a className="requirement-document" key={file.id} href={`/api/requirements/${detail.id}/documents/${file.id}/download`}><FileText size={16}/><span>{file.name}<small>{Math.ceil(file.size / 1024)} KB</small></span><ArrowDownToLine size={16}/></a>)}</div> : <p className="muted requirement-empty-note">暂无需求文档</p>}
+        </section>
+        <section className="asset-panel requirement-demos">
+          <div className="panel-title"><div><h2>关联 Demo</h2><span>{detail.demos.length} 个可见 Demo</span></div>{['open', 'needs_update'].includes(detail.status) && <div className="requirement-actions">{canCreateDemo && <button className="button" onClick={() => onCreateDemo(detail)}><Plus size={15}/>上传 Demo</button>}{detail.canManage && <button className="button primary" onClick={() => setBinding(value => !value)}><Link2 size={15}/>{binding ? '收起绑定' : '绑定已有 Demo'}</button>}</div>}</div>
+          <p className="requirement-access-note">仅展示你有权查看的 Demo；员工或主管可上传 Demo 并默认关联当前需求，需求内容与文档仍由发布人管理。</p>
+          {binding && detail.canManage && <BindDemo requirement={detail} onBound={onBound}/>}
+          {detail.demos.length ? <div className="requirement-demo-list">{detail.demos.map(asset => <div key={asset.id}><button className="requirement-demo-open" onClick={() => onOpenDemo(asset.id)}><div><strong>{asset.latest.description.title || '未命名 Demo'}</strong><small>{asset.owner.name} · V{asset.latest.number}</small></div><Badge status={asset.latest.status}/><ArrowUpRight size={15}/></button>{detail.canManage && <button className="button small" disabled={busy} onClick={() => onUnbind(asset)}>解除绑定</button>}</div>)}</div> : <Empty title="还没有可见的关联 Demo" description={detail.canManage ? '可以绑定已有 Demo。' : '此处仅展示你有权查看的关联 Demo。'}/>}
+        </section>
+      </div>
+      <aside className="requirement-detail-side">
+        <section className="settings-card requirement-people"><h3>负责人</h3><RequirementOwners requirement={detail}/></section>
+        <RequirementCalendarStatus requirement={detail}/>
+        <RequirementWikiStatus requirement={detail}/>
+      </aside>
+    </div>
     {forwarding && <RequirementForward requirement={detail} onClose={() => setForwarding(false)} onForwarded={count => { setForwarding(false); onForwarded(count); }}/>}
   </>;
 }
