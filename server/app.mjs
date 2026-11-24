@@ -15,6 +15,7 @@ import { setupAuth, publicUser } from './auth.mjs';
 import { seedPreview } from './seed.mjs';
 import { seedHarnessPreview } from './harness-preview.mjs';
 import { queryCatalog } from './catalog.mjs';
+import { dashboardData } from './dashboard.mjs';
 import { validateOrigin } from './runtime.mjs';
 import { createRagSearch } from './rag.mjs';
 import { createDescriptionAgent } from './description-agent.mjs';
@@ -94,6 +95,7 @@ export function createApp(options = {}) {
     const { assets, ...catalog } = queryCatalog(store, req.user, req.query);
     res.json({ ...catalog, items: assets.map(a => summary(req.user, a, false)) });
   });
+  app.get('/api/dashboard', (req, res) => res.json(dashboardData(store, req.user, req.query)));
   app.get('/api/config', (req, res) => res.json(settings()));
   app.get('/api/reviewers', (req,res) => res.json(all('SELECT * FROM users WHERE enabled=1').filter(user=>has(user,'supervisor')).map(publicUser)));
   app.get('/api/notification-candidates', (req,res) => res.json(all('SELECT * FROM users WHERE enabled=1 ORDER BY name').filter(user=>parse(user.roles,[]).length).map(publicUser)));

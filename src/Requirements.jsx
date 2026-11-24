@@ -11,7 +11,7 @@ import './requirements.css';
 
 const blank = { title: '', content: '', category: '', businessUserIds: [], developmentUserIds: [], publishDate: '', deadlineDate: '' };
 const statusLabels = { open: '进行中', needs_update: '待更新', delivered: '已交付', closed: '已关闭' };
-const statusLabel = status => statusLabels[status] || status;
+export const statusLabel = status => statusLabels[status] || status;
 const statusOptions = [{ value: 'all', label: '全部需求' }, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))];
 function Pager({ data, onPage, busy }) { return <div className="table-footer"><span>共 {data.total} 项 · 第 {data.page} / {data.pages} 页</span><div className="pagination"><button type="button" className="icon-button" aria-label="上一页" disabled={busy || data.page <= 1} onClick={() => onPage(data.page - 1)}><ChevronLeft size={17}/></button><button type="button" className="icon-button" aria-label="下一页" disabled={busy || data.page >= data.pages} onClick={() => onPage(data.page + 1)}><ChevronRight size={17}/></button></div></div>; }
 
@@ -220,7 +220,7 @@ function RequirementOwners({ requirement }) {
   return <div className="requirement-owner-summary"><ResponsiblePeople label="商务负责人" users={requirement.businessOwners}/><ResponsiblePeople label="研发负责人" users={requirement.developmentOwners}/></div>;
 }
 
-function RequirementDeadline({ requirement, compact = false }) {
+export function RequirementDeadline({ requirement, compact = false }) {
   const [currentTime, setCurrentTime] = useState(Date.now);
   const { deadlineDate, status } = requirement;
   useEffect(() => {

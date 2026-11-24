@@ -1,15 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, Layers3, LayoutDashboard, FolderOpen, ClipboardCheck, ClipboardList, ListChecks, Users, UserCog, Settings2, Search, Plus, ChevronRight, ArrowUpRight, LogOut, Grid2X2, List, Database, CircleCheck, Clock3, FilePenLine, ShieldCheck, X, Menu, RefreshCw, Bell, ArrowRight, Sparkles, FlaskConical, Info } from 'lucide-react';
+import { ChevronLeft, Gauge, Layers3, LayoutDashboard, FolderOpen, ClipboardCheck, ClipboardList, ListChecks, Users, UserCog, Settings2, Search, Plus, ChevronRight, ArrowUpRight, LogOut, Grid2X2, List, Database, CircleCheck, Clock3, FilePenLine, ShieldCheck, X, Menu, RefreshCw, Bell, ArrowRight, Sparkles, FlaskConical, Info } from 'lucide-react';
 import { api, setCsrf, streamApi } from './api';
-import { Avatar, Badge, Empty, Loading, ErrorBox, PageHeader, Toast, date, roleLabels } from './components';
+import { Avatar, Badge, Empty, Loading, ErrorBox, PageHeader, Toast, categoryColor, date, roleLabels } from './components';
 import { Editor, Detail } from './Demo';
 import { UsersPage, SettingsPage } from './Admin';
 import { RequirementsPage } from './Requirements';
+import { DashboardPage } from './Dashboard';
 import { routeToIntranet } from './network-routing.mjs';
 
 export default function App() {
   const [auth, setAuth] = useState(null), [error, setError] = useState(''), [assets, setAssets] = useState([]), [config, setConfig] = useState(null), [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(() => { const params = new URLSearchParams(location.search); return params.has('requirement') || ['requirements', 'my-requirements'].includes(params.get('view')) ? params.get('view') === 'my-requirements' ? 'my-requirements' : 'requirements' : 'library'; }), [status, setStatus] = useState('all'), [query, setQuery] = useState(''), [category, setCategory] = useState('all'), [owner, setOwner] = useState('all'), [layout, setLayout] = useState(() => window.matchMedia('(max-width: 700px)').matches ? 'grid' : 'list');
+  const [page, setPage] = useState(() => pageFromUrl() || 'library'), [status, setStatus] = useState('all'), [query, setQuery] = useState(''), [category, setCategory] = useState('all'), [owner, setOwner] = useState('all'), [layout, setLayout] = useState(() => window.matchMedia('(max-width: 700px)').matches ? 'grid' : 'list');
   const [requirementId, setRequirementId] = useState(new URLSearchParams(location.search).get('requirement'));
   const [detailId, setDetailId] = useState(new URLSearchParams(location.search).get('demo')), [editor, setEditor] = useState(() => { const params = new URLSearchParams(location.search); return params.get('view') === 'upload' ? { requirementIds: params.get('requirement') ? [params.get('requirement')] : [] } : null; }), [toast, setToast] = useState(''), [menu, setMenu] = useState(false), [reload, setReload] = useState(0);
   const [catalog, setCatalog] = useState({ stats: {}, owners: [], categories: [], total: 0, page: 1, pages: 1, pendingReviews: 0 });
@@ -21,11 +22,11 @@ export default function App() {
   useEffect(() => { const id = auth?.user?.id || null; if (previousUser.current && previousUser.current !== id) { setEditor(null); setDetailId(null); setConfig(null); setAssets([]); setPage('library'); } previousUser.current = id; }, [auth?.user?.id]);
   const user = auth?.user, has = role => user?.roles.includes(role);
   const notify = message => { setToast(message); window.setTimeout(() => setToast(''), 4000); };
-  function showDetail(id, replace = false) { history[replace ? 'replaceState' : 'pushState']({}, '', `/?demo=${encodeURIComponent(id)}` + (['requirements', 'my-requirements'].includes(page) ? `&view=${page}` + (requirementId ? `&requirement=${encodeURIComponent(requirementId)}` : '') : '')); setEditor(null); setDetailId(id); }
+  function showDetail(id, replace = false) { history[replace ? 'replaceState' : 'pushState']({}, '', `/?demo=${encodeURIComponent(id)}` + (['requirements', 'my-requirements'].includes(page) ? `&view=${page}` + (requirementId ? `&requirement=${encodeURIComponent(requirementId)}` : '') : page === 'dashboard' ? '&view=dashboard' : '')); setEditor(null); setDetailId(id); }
   function showUpload(requirement = null) { history.pushState({}, '', '/?view=upload' + (requirement?.id ? `&requirement=${encodeURIComponent(requirement.id)}` : '')); setDetailId(null); setEditor(requirement?.id ? { requirementIds: [requirement.id], requirements: [requirement] } : {}); }
-  function closeWorkspacePage() { history.pushState({}, '', ['requirements', 'my-requirements'].includes(page) ? requirementId ? `/?requirement=${encodeURIComponent(requirementId)}&view=${page}` : `/?view=${page}` : '/'); setDetailId(null); setEditor(null); }
+  function closeWorkspacePage() { history.pushState({}, '', ['requirements', 'my-requirements'].includes(page) ? requirementId ? `/?requirement=${encodeURIComponent(requirementId)}&view=${page}` : `/?view=${page}` : page === 'dashboard' ? '/?view=dashboard' : '/'); setDetailId(null); setEditor(null); }
   function showRequirement(id) { history.pushState({}, '', id ? `/?requirement=${encodeURIComponent(id)}&view=${page === 'my-requirements' ? 'my-requirements' : 'requirements'}` : `/?view=${page === 'my-requirements' ? 'my-requirements' : 'requirements'}`); setRequirementId(id); setPage(page === 'my-requirements' ? 'my-requirements' : 'requirements'); setDetailId(null); setEditor(null); }
-  useEffect(() => { const sync = () => { const params = new URLSearchParams(location.search); const id = params.get('demo'), requirement = params.get('requirement'), view = params.get('view'); setDetailId(id); setRequirementId(requirement); if (requirement || ['requirements', 'my-requirements'].includes(view)) setPage(view === 'my-requirements' ? 'my-requirements' : 'requirements'); else if (!id && !view) setPage('library'); if (!id && view === 'upload') setEditor(requirement ? { requirementIds: [requirement] } : {}); else setEditor(null); }; addEventListener('popstate', sync); return () => removeEventListener('popstate', sync); }, []);
+  useEffect(() => { const sync = () => { const params = new URLSearchParams(location.search); const id = params.get('demo'), requirement = params.get('requirement'), view = params.get('view'); setDetailId(id); setRequirementId(requirement); const next = pageFromUrl(); if (next) setPage(next); else if (!id && !view) setPage('library'); if (!id && view === 'upload') setEditor(requirement ? { requirementIds: [requirement] } : {}); else setEditor(null); }; addEventListener('popstate', sync); return () => removeEventListener('popstate', sync); }, []);
   async function loadAuth() { try { const result = await api('/auth/me'); setCsrf(result.csrf); setAuth(result); setError(''); } catch (e) { setError(e.message); } }
   function refresh() { setReload(n => n + 1); }
   useEffect(() => {
@@ -44,15 +45,13 @@ export default function App() {
   const businessOnly = user?.roles.includes('business') && !user.roles.some(r => ['employee', 'supervisor', 'pm', 'admin'].includes(r));
   const home = businessOnly ? 'search' : user?.roles.length === 1 && has('admin') ? 'users' : 'library';
   useEffect(() => {
-    if (!new URLSearchParams(location.search).has('requirement') && !['requirements', 'my-requirements'].includes(new URLSearchParams(location.search).get('view'))) {
-      if (user?.enabled && home !== 'library') setPage(home);
-    }
+    if (!pageFromUrl() && user?.enabled && home !== 'library') setPage(home);
     if (!user?.enabled || !user?.roles.length) { setAssets([]); setLoading(false); }
   }, [identity]);
   useEffect(() => { if (!user?.enabled || !user.roles.length) return; const controller = new AbortController(); api('/config', { signal: controller.signal }).then(setConfig).catch(error => { if (!controller.signal.aborted) setError(error.message); }); return () => controller.abort(); }, [identity, reload]);
   useEffect(() => { setPageNumber(1); }, [page, status, query, category, owner, pageSize, days, sort]);
   useEffect(() => {
-    if (!user?.enabled || !user.roles.length || ['users', 'settings', 'search', 'requirements', 'my-requirements'].includes(page)) return;
+    if (!user?.enabled || !user.roles.length || ['users', 'settings', 'search', 'requirements', 'my-requirements', 'dashboard'].includes(page)) return;
     const controller = new AbortController(); setLoading(true);
     const timer = setTimeout(async () => {
       try {
@@ -66,7 +65,7 @@ export default function App() {
     return () => { clearTimeout(timer); controller.abort(); };
   }, [identity, page, status, query, category, owner, pageNumber, pageSize, days, sort, reload]);
   async function logout() { try { await api('/auth/logout', { method: 'POST' }); setAssets([]); setDetailId(null); setEditor(null); setPage('library'); setStatus('all'); setQuery(''); setCategory('all'); setOwner('all'); await loadAuth(); } catch (e) { setError(e.message); } }
-  function navigate(next) { history.pushState({}, '', ['requirements', 'my-requirements'].includes(next) ? `/?view=${next}` : '/'); setDetailId(null); setEditor(null); setRequirementId(null); setPage(next); setStatus('all'); setQuery(''); setCategory('all'); setOwner('all'); setDays('0'); setSort('updated'); setPageNumber(1); setMenu(false); }
+  function navigate(next) { history.pushState({}, '', ['requirements', 'my-requirements', 'dashboard'].includes(next) ? `/?view=${next}` : '/'); setDetailId(null); setEditor(null); setRequirementId(null); setPage(next); setStatus('all'); setQuery(''); setCategory('all'); setOwner('all'); setDays('0'); setSort('updated'); setPageNumber(1); setMenu(false); }
   function showStatus(next) { setStatus(next); setQuery(''); setCategory('all'); setOwner('all'); setDays('0'); setPageNumber(1); requestAnimationFrame(() => listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   async function searchRag(e) { e.preventDefault(); if (ragQuestion.trim().length < 2) return; setRagBusy(true); setRagError(''); setRagResult(null); setRagStages([]); try { await streamApi('/search/rag/stream', { question: ragQuestion.trim() }, event => { if (event.type === 'stage') setRagStages(items => [...items, event]); else if (event.type === 'result') setRagResult(event); else if (event.type === 'error') setRagError(event.error); }); } catch (err) { setRagError(err.message); } finally { setRagBusy(false); } }
   if (!auth) return <div className="boot"><div className="boot-card"><img className="boot-logo" src="/logo.png" alt="PRT"/>{error ? <><ErrorBox>{error}</ErrorBox><button className="button primary" onClick={loadAuth}>重试</button></> : <Loading/>}</div></div>;
@@ -76,7 +75,7 @@ export default function App() {
   const pending = catalog.pendingReviews || 0;
   const dataRoles = has('employee') || has('supervisor') || has('pm') || has('business'), globalView = has('pm') || has('business');
   const stats = [{ title: 'Demo 总数', filter: 'all', value: counts.total || 0, note: `${counts.versions || 0} 个版本持续沉淀`, Icon: Database, tone: 'primary' }, { title: '已有发布版本', filter: 'published', value: counts.published || 0, note: '新版本审核不影响已发布数据', Icon: CircleCheck, tone: 'success' }, { title: '待审核', filter: 'pending', value: counts.pending || 0, note: '等待主管确认发布', Icon: Clock3, tone: 'warning' }, { title: '待完善', filter: 'incomplete', value: (counts.draft || 0) + (counts.returned || 0), note: '草稿与退回待修改', Icon: FilePenLine, tone: 'info' }];
-  const titles = { library: globalView ? '数据资产库' : '数据工作台', search: '智能检索', requirements: '需求中心', 'my-requirements': '我的需求', mine: '我的 Demo', team: '团队 Demo', reviews: '审核工作台', users: '人员与权限', settings: '平台设置' };
+  const titles = { dashboard: '数据大屏', library: globalView ? '数据资产库' : '数据工作台', search: '智能检索', requirements: '需求中心', 'my-requirements': '我的需求', mine: '我的 Demo', team: '团队 Demo', reviews: '审核工作台', users: '人员与权限', settings: '平台设置' };
   const descriptions = { reviews: '把好发布前的最后一关，让每份数据都准备就绪。', mine: '管理你的数据样例，从第一次上传到每一次迭代。', team: '查看团队成员的数据样例与版本进展。' };
   return <div className="app-shell">
     <header className="app-header">
@@ -94,6 +93,8 @@ export default function App() {
       {menu && <div className="mobile-scrim" onClick={() => setMenu(false)}/>}
       <aside className={`sidebar ${menu ? 'open' : ''}`}>
         <nav aria-label="主导航">
+          <div className="nav-label">总览</div>
+          <Nav active={page === 'dashboard'} icon={Gauge} onClick={() => navigate('dashboard')}>数据大屏</Nav>
           <div className="nav-label">需求协作</div>
           <Nav active={page === 'requirements'} icon={ClipboardList} onClick={() => navigate('requirements')}>需求中心</Nav>
           <Nav active={page === 'my-requirements'} icon={ListChecks} onClick={() => navigate('my-requirements')}>我的需求</Nav>
@@ -114,7 +115,7 @@ export default function App() {
       </aside>
       <main className="main">
         <ErrorBox>{error}</ErrorBox>
-        {page === 'users' ? <UsersPage notify={notify}/> : page === 'settings' ? <SettingsPage notify={notify} onSaved={refresh}/> : ['requirements', 'my-requirements'].includes(page) ? <RequirementsPage key={identity} user={user} config={config} selectedId={requirementId} assignedOnly={page === 'my-requirements'} refreshKey={reload} onSelect={showRequirement} onOpenDemo={showDetail} onCreateDemo={showUpload} notify={notify} onChanged={refresh}/> : page === 'search' ? <RagPage question={ragQuestion} setQuestion={setRagQuestion} result={ragResult} stages={ragStages} busy={ragBusy} error={ragError} onSearch={searchRag} onOpen={showDetail}/> : <>
+        {page === 'dashboard' ? <DashboardPage refreshKey={reload} onOpenDemo={showDetail} onOpenRequirement={showRequirement} onShowRequirements={() => navigate('requirements')} onShowDemos={dataRoles ? next => { navigate('library'); setStatus(next); } : null}/> : page === 'users' ? <UsersPage notify={notify}/> : page === 'settings' ? <SettingsPage notify={notify} onSaved={refresh}/> : ['requirements', 'my-requirements'].includes(page) ? <RequirementsPage key={identity} user={user} config={config} selectedId={requirementId} assignedOnly={page === 'my-requirements'} refreshKey={reload} onSelect={showRequirement} onOpenDemo={showDetail} onCreateDemo={showUpload} notify={notify} onChanged={refresh}/> : page === 'search' ? <RagPage question={ragQuestion} setQuestion={setRagQuestion} result={ragResult} stages={ragStages} busy={ragBusy} error={ragError} onSearch={searchRag} onOpen={showDetail}/> : <>
           <PageHeader title={titles[page]} description={descriptions[page] || '汇集业务数据样例，让每一次演示都有据可依。'} actions={(has('employee') || has('supervisor')) && <button className="button primary" disabled={!config || loading} onClick={() => showUpload()}><Plus size={16}/>上传 Demo</button>}/>
           <section className="stats-grid">{stats.map(({ title, filter, value, note, Icon, tone }) => <button type="button" className={`stat-card ${status === filter ? 'selected' : ''}`} key={filter} onClick={() => showStatus(filter)} aria-pressed={status === filter} aria-label={`查看${title}列表`}><span className="stat-label"><span className={`stat-icon ${tone}`}><Icon size={14}/></span>{title}</span><strong className="stat-value">{value}</strong><small>{note}</small></button>)}</section>
           {page === 'reviews' && <div className="inline-hint"><ClipboardCheck size={16}/><div><strong>有 {pending} 个版本等待你的审核</strong><span>检查数据说明与文件，可直接修改后发布，也可以退回给员工补充。</span></div></div>}
@@ -144,8 +145,13 @@ function RagPage({ question, setQuestion, result, stages, busy, error, onSearch,
     {result ? <section className="card rag-answer"><div className="rag-answer-title"><strong>检索结果</strong><span>{result.modelUsed ? 'LLM · RAG' : '本地检索'}</span></div><p>{result.answer}</p>{result.modelError && <small className="rag-fallback">模型暂时不可用，已展示本地检索结果。</small>}{result.sources.length > 0 && <div className="rag-sources">{result.sources.map((asset, index) => <button key={asset.id} onClick={() => onOpen(asset.id)}><span>{index + 1}</span><div><strong>{asset.latest.description.title || '未命名 Demo'}</strong><small>{asset.latest.description.summary || '暂未填写简介'} · {asset.owner.name}</small></div><ArrowUpRight size={15}/></button>)}</div>}</section> : !busy && <div className="card rag-empty"><span className="empty-icon"><Search size={22}/></span><strong>输入一句话开始检索</strong><p>系统只会检索当前账号有权限查看的数据说明。</p></div>}
   </>;
 }
+// Pages addressed by ?view= (a requirement link always lands in the requirement center).
+function pageFromUrl(params = new URLSearchParams(location.search)) {
+  const view = params.get('view');
+  if (params.has('requirement') || ['requirements', 'my-requirements'].includes(view)) return view === 'my-requirements' ? 'my-requirements' : 'requirements';
+  return view === 'dashboard' ? 'dashboard' : null;
+}
 function Nav({ active, icon: Icon, children, onClick, count = 0 }) { return <button className={`nav-item ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} onClick={onClick}><Icon size={16}/><span>{children}</span>{count > 0 && <span className="nav-count">{count > 99 ? '99+' : count}</span>}</button>; }
-function categoryColor(category) { return ({ 金融服务: 'violet', 工业制造: 'blue', 医疗健康: 'rose', 通用数据: 'amber' })[category] || 'green'; }
 function Login({ auth, onLogin }) {
   const [accounts, setAccounts] = useState([]), [selected, setSelected] = useState('preview-manager'), [busy, setBusy] = useState(false), [error, setError] = useState(new URLSearchParams(location.search).get('authError') || '');
   useEffect(() => { if (auth.demoMode) api('/auth/demo-users').then(setAccounts).catch(e => setError(e.message)); }, []);

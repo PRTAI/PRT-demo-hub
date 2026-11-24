@@ -9,16 +9,20 @@ const querySchema = z.object({
   requirement: z.union([z.literal('all'), z.uuid()]).default('all'),
   days: z.coerce.number().int().min(0).max(3650).default(0), sort: z.enum(['updated', 'created', 'name']).default('updated'),
 });
-const from = `FROM assets a JOIN users u ON u.id=a.owner_id JOIN versions v ON v.id=(SELECT vv.id FROM versions vv WHERE vv.asset_id=a.id ORDER BY number DESC LIMIT 1)`;
+export const from = `FROM assets a JOIN users u ON u.id=a.owner_id JOIN versions v ON v.id=(SELECT vv.id FROM versions vv WHERE vv.asset_id=a.id ORDER BY number DESC LIMIT 1)`;
+// SQL twin of the visible() helper in app.mjs, written against the asset alias `a`.
+export function assetAccess(user) {
+  const roles = parse(user.roles, []), access = [], args = [];
+  if (roles.includes('employee') || roles.includes('supervisor')) { access.push('a.owner_id=?'); args.push(user.id); }
+  if (roles.includes('supervisor')) { access.push('EXISTS(SELECT 1 FROM versions rv WHERE rv.asset_id=a.id AND rv.reviewer_id=?)'); args.push(user.id); }
+  access.push('EXISTS(SELECT 1 FROM asset_permissions ap WHERE ap.asset_id=a.id AND ap.user_id=?)'); args.push(user.id);
+  if (roles.includes('pm') || roles.includes('business')) access.push('1=1');
+  return { sql: `(${access.join(' OR ')})`, args };
+}
 export function queryCatalog(store, user, input) {
   const query = querySchema.parse(input), roles = parse(user.roles, []), conditions = [], args = [];
-  const canOwn = roles.includes('employee') || roles.includes('supervisor'), manager = roles.includes('supervisor');
-  const access = [], accessArgs = [];
-  if (canOwn) { access.push('a.owner_id=?'); accessArgs.push(user.id); }
-  if (manager) { access.push('EXISTS(SELECT 1 FROM versions rv WHERE rv.asset_id=a.id AND rv.reviewer_id=?)'); accessArgs.push(user.id); }
-  access.push('EXISTS(SELECT 1 FROM asset_permissions ap WHERE ap.asset_id=a.id AND ap.user_id=?)'); accessArgs.push(user.id);
-  if (roles.includes('pm') || roles.includes('business')) access.push('1=1');
-  conditions.push(`(${access.length ? access.join(' OR ') : '0=1'})`); args.push(...accessArgs);
+  const manager = roles.includes('supervisor'), access = assetAccess(user);
+  conditions.push(access.sql); args.push(...access.args);
   if (query.scope === 'mine') { conditions.push('a.owner_id=?'); args.push(user.id); }
   if (['team', 'reviews'].includes(query.scope)) {
     conditions.push(manager ? '(a.owner_id=? OR EXISTS(SELECT 1 FROM versions rv WHERE rv.asset_id=a.id AND rv.reviewer_id=?))' : '0=1'); if (manager) args.push(user.id, user.id);
