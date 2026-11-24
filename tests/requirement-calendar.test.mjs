@@ -98,6 +98,17 @@ test('calendar backfills old requirements and creates private all-day events wit
   assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM notifications WHERE kind='requirement_calendar'").count, 2);
 });
 
+test('calendar only invites development owners and sends cards to them, not to the publisher or business owners', async t => {
+  const ctx = fixture(t);
+  ctx.store.run("UPDATE requirement_assignees SET responsibility='business' WHERE requirement_id=? AND user_id='preview-pm'", ctx.id);
+  ctx.store.run("INSERT INTO requirement_assignees(requirement_id,user_id,assigned_by,created_at,responsibility) VALUES(?,?,?,?,'both')", ctx.id, 'preview-colleague', 'preview-pm', now());
+  await ctx.calendar.drain();
+  assert.deepEqual(new Set(ctx.attendees.keys()), new Set(['ou_preview-employee', 'ou_preview-colleague']));
+  assert.deepEqual(new Set(ctx.store.all("SELECT recipient_id FROM notifications WHERE kind='requirement_calendar'").map(row => row.recipient_id)), new Set(['preview-employee', 'preview-colleague']));
+  const event = ctx.events.values().next().value;
+  assert.ok(event.description.includes('发布人：周亦舒')); assert.ok(event.description.includes('商务负责人：'));
+});
+
 test('calendar persists event IDs before invites and resumes failed invitations after reopening SQLite without duplicate events', async t => {
   const ctx = fixture(t); ctx.controls.failInvite = 1;
   await ctx.calendar.drain();
@@ -307,7 +318,9 @@ test('old notification schema migrates without losing queued jobs and supports i
   const notifications = createNotifications(store, { demoMode: true });
   assert.equal(store.one('SELECT version_id FROM notifications WHERE id=?', id).version_id, version);
   const requirement = store.one('SELECT * FROM requirements'); notifications.enqueueRequirement(requirement); notifications.enqueueRequirement(requirement);
-  assert.equal(store.one('SELECT COUNT(*) AS count FROM notifications WHERE requirement_id=?', requirement.id).count, 8);
-  assert.equal(store.one('SELECT COUNT(*) AS count FROM notifications WHERE version_id IS NULL').count, 8);
+  // The seeded requirement has seven development owners (the publisher among them); the business owner is not notified.
+  assert.equal(store.one('SELECT COUNT(*) AS count FROM notifications WHERE requirement_id=?', requirement.id).count, 7);
+  assert.equal(store.one('SELECT COUNT(*) AS count FROM notifications WHERE version_id IS NULL').count, 7);
+  assert.equal(store.one("SELECT COUNT(*) AS count FROM notifications WHERE requirement_id=? AND recipient_id='preview-business'", requirement.id).count, 0);
   assert.deepEqual(store.all('PRAGMA foreign_key_check'), []);
 });

@@ -319,10 +319,10 @@ test('Feishu notifications queue atomically, deliver to supervisor then PM, and 
   const demo = await create(owner);
   await owner.upload(demo.versionId,0).expect(201);
   await owner.send('post',`/versions/${demo.versionId}/actions`,{revision:1,action:'submit'}).expect(200);
-  assert.equal(ctx.notifications.list().length,1);
-  assert.equal(ctx.notifications.list()[0].recipient_id,'preview-manager');
+  const submitted = () => ctx.notifications.list().map(n=>[n.kind,n.recipient_id]).sort();
+  assert.deepEqual(submitted(),[['submit','preview-manager'],['submit_publisher','preview-pm']]);
   await owner.send('post',`/versions/${demo.versionId}/actions`,{revision:1,action:'submit'}).expect(409);
-  assert.equal(ctx.notifications.list().length,1);
+  assert.deepEqual(submitted(),[['submit','preview-manager'],['submit_publisher','preview-pm']]);
   await manager.send('post',`/versions/${demo.versionId}/actions`,{revision:2,action:'publish'}).expect(200);
   assert.equal(ctx.notifications.list().filter(n=>n.kind==='publish').length,3);
   const {createNotifications} = await import('../server/notifications.mjs');
@@ -335,6 +335,7 @@ test('Feishu notifications queue atomically, deliver to supervisor then PM, and 
   }});
   await sender.drain();
   assert.equal(sender.list().find(n=>n.kind==='submit').status,'skipped');
+  assert.equal(sender.list().find(n=>n.kind==='submit_publisher').status,'skipped');
   const pending=sender.list().find(n=>n.kind==='publish');
   assert.equal(pending.status,'pending'); assert.equal(pending.attempts,1);
   fail=false;ctx.store.run('UPDATE notifications SET next_at=0');
@@ -1042,6 +1043,42 @@ test('Feishu sends requirement snapshots to business publishers and retries publ
   assert.ok(sender.list().filter(job => job.kind === 'restore').every(job => job.status === 'sent'));
 });
 
+test('submitting a Demo notifies linked requirement publishers once, except the submitter and the reviewing supervisor', async t => {
+  const ctx = await fixture(t), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business'), manager = await ctx.login('preview-manager');
+  ctx.store.run('UPDATE users SET roles=? WHERE id=?', JSON.stringify(['employee', 'business']), 'preview-employee');
+  const employee = await ctx.login('preview-employee');
+  const first = await publishRequirement(business, { title: '商务提交提醒需求一' }), second = await publishRequirement(business, { title: '商务提交提醒需求二' });
+  const pmRequirement = await publishRequirement(pm, { title: '产品提交提醒需求' }), managerRequirement = await publishRequirement(manager, { title: '审核主管发布的需求' }), own = await publishRequirement(employee, { title: '提交人发布的需求' });
+  const demo = (await employee.send('post', '/assets', { description, requirementIds: [first.id, second.id, pmRequirement.id, managerRequirement.id, own.id] }).expect(201)).body;
+  await employee.upload(demo.versionId, 0).expect(201);
+  await action(employee, demo.versionId, 1, 'submit').then(result => assert.equal(result.status, 200));
+  const versionJobs = () => ctx.notifications.list().filter(job => job.version_id === demo.versionId);
+  assert.deepEqual(versionJobs().map(job => [job.kind, job.recipient_id]).sort(), [['submit', 'preview-manager'], ['submit_publisher', 'preview-business'], ['submit_publisher', 'preview-pm']]);
+  const snapshot = id => JSON.parse(versionJobs().find(job => job.kind === 'submit_publisher' && job.recipient_id === id).detail).requirements.map(requirement => requirement.id);
+  assert.deepEqual(snapshot('preview-business'), [first.id, second.id]); assert.deepEqual(snapshot('preview-pm'), [pmRequirement.id]);
+  ctx.store.run("DELETE FROM notifications WHERE kind='requirement_publish'");
+  const { createNotifications } = await import('../server/notifications.mjs');
+  ctx.store.run("UPDATE users SET open_id='ou_mock_' || id");
+  const calls = [], sender = createNotifications(ctx.store, { demoMode: false, appId: 'test', appSecret: 'test', notificationFetch: async (url, options) => {
+    if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'mock', expire: 7200 }) };
+    calls.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ code: 0 }) };
+  } });
+  await sender.drain();
+  assert.deepEqual(new Set(calls.map(message => message.receive_id)), new Set(['ou_mock_preview-manager', 'ou_mock_preview-business', 'ou_mock_preview-pm']));
+  const text = JSON.parse(calls.find(message => message.receive_id === 'ou_mock_preview-business').content).text;
+  assert.ok(text.includes('关联需求的 Demo 已提交')); assert.ok(text.includes('关联需求（提交时）'));
+  assert.ok(text.includes('商务提交提醒需求一')); assert.ok(text.includes('商务提交提醒需求二')); assert.ok(!text.includes('产品提交提醒需求'));
+  assert.ok(text.includes(`demo=${demo.id}`)); assert.ok(!text.includes(description.costEstimate));
+  await action(employee, demo.versionId, 2, 'withdraw').then(result => assert.equal(result.status, 200));
+  assert.equal(versionJobs().filter(job => job.kind === 'submit_publisher').length, 2);
+  await action(employee, demo.versionId, 3, 'submit').then(result => assert.equal(result.status, 200));
+  assert.equal(versionJobs().filter(job => job.kind === 'submit_publisher').length, 4);
+  await action(employee, demo.versionId, 4, 'withdraw').then(result => assert.equal(result.status, 200));
+  calls.length = 0; await sender.drain();
+  assert.ok(calls.every(message => message.receive_id === 'ou_mock_preview-manager'));
+  assert.deepEqual(sender.list().filter(job => job.kind === 'submit_publisher').map(job => job.status).sort(), ['sent', 'sent', 'skipped', 'skipped']);
+});
+
 test('queued business notifications are skipped when accounts, roles or requirement bindings change', async t => {
   const ctx = await fixture(t), manager = await ctx.login('preview-manager'), pm = await ctx.login('preview-pm'), business = await ctx.login('preview-business');
   ctx.store.run('UPDATE users SET roles=? WHERE id IN (?,?)', JSON.stringify(['business']), 'preview-other-manager', 'preview-colleague');
@@ -1363,7 +1400,8 @@ test('publishing a requirement atomically queues deduplicated notifications and 
   await pm.send('post', '/requirements', { ...requirementContent, assignedUserIds: ['missing'] }).expect(400);
   assert.deepEqual(counts(), before);
   const unassigned = await publishRequirement(pm, { assignedUserIds: [] });
-  assert.deepEqual(ctx.store.all('SELECT recipient_id FROM notifications WHERE requirement_id=?', unassigned.id).map(job => job.recipient_id), ['preview-pm']);
+  // Without development owners nobody is notified; the publisher hears about the requirement when a linked Demo is submitted.
+  assert.deepEqual(ctx.store.all('SELECT recipient_id FROM notifications WHERE requirement_id=?', unassigned.id), []);
   assert.match(unassigned.plannedDate, /^\d{4}-\d{2}-\d{2}$/);
 });
 
@@ -1375,7 +1413,7 @@ test('requirements separate optional owner groups, deduplicate dual roles and pr
   assert.deepEqual(new Set(requirement.developmentOwners.map(user => user.id)), new Set(['preview-employee', 'preview-colleague']));
   assert.equal(requirement.assignedUsers.length, 3);
   assert.equal(ctx.store.one('SELECT responsibility FROM requirement_assignees WHERE requirement_id=? AND user_id=?', requirement.id, 'preview-colleague').responsibility, 'both');
-  assert.equal(ctx.store.one('SELECT COUNT(*) AS count FROM notifications WHERE requirement_id=?', requirement.id).count, 4);
+  assert.deepEqual(new Set(ctx.store.all('SELECT recipient_id FROM notifications WHERE requirement_id=?', requirement.id).map(job => job.recipient_id)), new Set(['preview-employee', 'preview-colleague']));
   const readonly = (await employee.get(`/requirements/${requirement.id}`).expect(200)).body;
   assert.equal(readonly.canManage, false); assert.equal(readonly.canStatusManage, false);
   await employee.send('put', `/requirements/${requirement.id}`, { ...requirementContent, revision: 0 }).expect(403);
@@ -1512,20 +1550,20 @@ test('publishing a requirement creates one Feishu event with native invitations 
   const requirement = await publishRequirement(pm, { businessUserIds: ['preview-business'], developmentUserIds: ['preview-employee', 'preview-pm'], publishDate: '2028-02-28', deadlineDate: '2028-02-29' });
   ctx.store.run("UPDATE users SET open_id='ou_' || id"); ctx.config.demoMode = false;
   await ctx.notifications.drain();
-  assert.equal(messages.length, 3); assert.ok(messages.every(message => message.msg_type === 'text'));
+  assert.equal(messages.length, 2); assert.ok(messages.every(message => message.msg_type === 'text'));
   assert.equal(ctx.store.one("SELECT COUNT(*) AS count FROM notifications WHERE kind='requirement_calendar'").count, 0);
   await ctx.requirementCalendar.drain();
   const event = calendarCalls.find(call => call.url.pathname.endsWith('/events') && call.method === 'POST');
   assert.deepEqual(event.body.start_time, { date: '2028-02-28' }); assert.deepEqual(event.body.end_time, { date: '2028-03-01' });
   assert.equal(calendarCalls.find(call => call.url.pathname.endsWith('/attendees') && call.method === 'POST').body.need_notification, true);
-  const audience = new Set(['ou_preview-pm', 'ou_preview-business', 'ou_preview-employee']);
+  const audience = new Set(['ou_preview-pm', 'ou_preview-employee']);
   assert.deepEqual(new Set(attendees.map(attendee => attendee.user_id)), audience);
   await ctx.notifications.drain();
   const cards = messages.filter(message => message.msg_type === 'interactive');
-  assert.equal(cards.length, 3); assert.deepEqual(new Set(cards.map(message => message.receive_id)), audience);
+  assert.equal(cards.length, 2); assert.deepEqual(new Set(cards.map(message => message.receive_id)), audience);
   const info = (await pm.get(`/requirements/${requirement.id}/calendar`).expect(200)).body;
-  assert.equal(info.status, 'synced'); assert.equal(info.messages.sent, 3); assert.ok(info.appLink.includes('event_test'));
-  await ctx.requirementCalendar.drain(); await ctx.notifications.drain(); assert.equal(messages.length, 6);
+  assert.equal(info.status, 'synced'); assert.equal(info.messages.sent, 2); assert.ok(info.appLink.includes('event_test'));
+  await ctx.requirementCalendar.drain(); await ctx.notifications.drain(); assert.equal(messages.length, 4);
 });
 
 test('calendar updates share one event key across edits, forwarding and status changes while the admin queue stays restricted', async t => {

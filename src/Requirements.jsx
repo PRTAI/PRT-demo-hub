@@ -160,7 +160,7 @@ function RequirementForm({ editing, setEditing, config, assigneeUsers, pendingDo
         <OwnerPicker title="商务负责人" description="负责业务沟通与客户对接" users={assigneeUsers} roles={businessOwnerRoles} selectedUsers={editing.businessOwners || []} value={editing.businessUserIds || editing.businessOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, businessUserIds: ids }))} disabled={busy}/>
         <OwnerPicker title="研发负责人" description="负责技术实现与 Demo 交付" users={assigneeUsers} roles={developmentOwnerRoles} selectedUsers={editing.developmentOwners || []} value={editing.developmentUserIds || editing.developmentOwners?.map(user => user.id) || []} onChange={ids => setEditing(current => ({ ...current, developmentUserIds: ids }))} disabled={busy}/>
       </div>
-      <p className="requirement-owner-hint">两组均可不选或多选。发布后通知两组负责人及发布人，并邀请参加需求日程；转发新增人员归入研发负责人。</p>
+      <p className="requirement-owner-hint">两组均可不选或多选。发布后仅通知研发负责人并邀请其参加需求日程，Demo 提交审核时再通知发布人；转发新增人员归入研发负责人。</p>
       <label className="field">备注（可选）<textarea rows={4} maxLength={20000} value={editing.content} onChange={event => setEditing({ ...editing, content: event.target.value })} disabled={busy} placeholder="补充说明，可粘贴飞书文档链接。"/></label>
       <div className="requirement-actions"><button type="button" className="button" onClick={cancelEdit} disabled={busy}>取消</button><button className="button primary" disabled={busy || !editing.title.trim()}>{busy ? '保存中…' : editing.id ? '保存修改' : '发布需求'}</button></div>
     </form>
@@ -265,7 +265,7 @@ function RequirementCalendarStatus({ requirement }) {
   }
   return <div className="requirement-calendar">
     <div><CalendarDays size={16}/><strong>飞书日历</strong><span>发布日期：{requirement.publishDate}（全天）</span><RequirementDeadline requirement={requirement}/></div>
-    <p role="status">{({ pending: '正在同步，失败时会自动重试', synced: '已关联日程，并同步负责人及发布人', failed: requirement.canRetryCalendar ? '同步失败，修复下方问题后可点击“重试同步”' : '同步失败，请联系商务、项目经理或管理员检查后重试' })[calendar?.status] || '等待同步'}</p>
+    <p role="status">{({ pending: '正在同步，失败时会自动重试', synced: '已关联日程，并同步研发负责人', failed: requirement.canRetryCalendar ? '同步失败，修复下方问题后可点击“重试同步”' : '同步失败，请联系商务、项目经理或管理员检查后重试' })[calendar?.status] || '等待同步'}</p>
     {calendar?.messages && (calendar.messages.pending + calendar.messages.sent + calendar.messages.failed > 0) && <p role="status">日程卡片：已发送 {calendar.messages.sent} 人{calendar.messages.pending > 0 ? `，等待发送 ${calendar.messages.pending} 人` : ''}{calendar.messages.failed > 0 ? `，${calendar.messages.failed} 人发送失败，请管理员在“平台设置 → 飞书通知”重试` : ''}。</p>}
     {(calendar?.error || error) && <p className="requirement-calendar-error">{error || calendar.error}</p>}
     {calendar?.error?.includes('99991672') && <p>此错误需要飞书应用管理员在开放平台开通日历接口的应用身份权限，并发布新版本使权限生效。</p>}

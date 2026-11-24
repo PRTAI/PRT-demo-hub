@@ -22,8 +22,9 @@ export function createRequirementCalendar(store, config, notifications) {
     for (const requirement of all(refreshLayout ? 'SELECT id FROM requirements' : 'SELECT id FROM requirements WHERE id NOT IN (SELECT requirement_id FROM requirement_calendar)')) enqueue(requirement.id);
     run("INSERT OR REPLACE INTO metadata(key,value) VALUES('requirement_calendar_fields_version','2')");
   });
+  // Only development owners are invited; the publisher and business owners are listed in the event description.
   const participants = id => all(`SELECT u.* FROM users u WHERE u.enabled=1 AND u.deleted_at IS NULL AND
-    (u.id=(SELECT publisher_id FROM requirements WHERE id=?) OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=? AND ra.user_id=u.id)) ORDER BY u.name,u.id`, id, id).filter(user => !user.open_id.startsWith('preview:'));
+    EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=? AND ra.user_id=u.id AND ra.responsibility IN ('development','both')) ORDER BY u.name,u.id`, id).filter(user => !user.open_id.startsWith('preview:'));
   function enqueueForUser(userId) {
     for (const requirement of all('SELECT id FROM requirements r WHERE publisher_id=? OR EXISTS(SELECT 1 FROM requirement_assignees ra WHERE ra.requirement_id=r.id AND ra.user_id=?)', userId, userId)) enqueue(requirement.id);
   }
